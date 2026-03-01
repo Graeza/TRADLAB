@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import time
 import queue
 import joblib
+import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
+from collections import deque
 
 from core.mt5_init import initialize_mt5
 from core.data_fetcher import DataFetcher
@@ -26,6 +29,7 @@ from config.settings import (
 from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 from utils.mt5_positions import close_positions, list_positions
+from utils.mt5_account import get_account_summary
 
 class LogPump(QtCore.QObject):
     line = QtCore.Signal(str)
@@ -56,6 +60,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = LogPump()
 
         self.decisions = {}  # symbol -> payload dict
+
+        # --- Equity curve history (last N points) ---
+        self.eq_t = deque(maxlen=600)      # timestamps
+        self.eq_equity = deque(maxlen=600) 
+        self.eq_balance = deque(maxlen=600)
+        self.eq_last = None  # (equity, balance) last plotted values
+
         self.bus = DecisionBus()
         self.bus.decision.connect(self.on_decision)
 
@@ -143,6 +154,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tabs.addTab(dbg_tab, "Strategy Debug")
 
+        # --- Tab 3: Portfolio ---
+        port_tab = QtWidgets.QWidget()
+        port_layout = QtWidgets.QVBoxLayout(port_tab)
+
+        self.lbl_account = QtWidgets.QLabel("Account: —")
+        self.lbl_account.setStyleSheet("font-weight: 600;")
+        port_layout.addWidget(self.lbl_account)
+
+        grid = QtWidgets.QGridLayout()
+        port_layout.addLayout(grid)
+
+        def add_row(row, label):
+            lab = QtWidgets.QLabel(label)
+            val = QtWidgets.QLabel("—")
+            val.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(lab, row, 0)
+            grid.addWidget(val, row, 1)
+            return val
+
+        self.v_balance = add_row(0, "Balance")
+        self.v_equity = add_row(1, "Equity")
+        self.v_profit = add_row(2, "Floating PnL")
+        self.v_margin = add_row(3, "Margin Used")
+        self.v_free_margin = add_row(4, "Free Margin")
+        self.v_margin_level = add_row(5, "Margin Level (%)")
+        self.v_risk_used = add_row(6, "Risk Used (%)")   
+        self.v_leverage = add_row(7, "Leverage") 
+
+        # --- Equity Curve Chart ---
+        self.eq_plot = pg.PlotWidget()
+        self.eq_plot.setBackground(None)  # uses default theme background
+        self.eq_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.eq_plot.setTitle("Equity / Balance (live)")
+        self.eq_plot.setLabel("left", "Value")
+        self.eq_plot.setLabel("bottom", "Time (s)")
+
+        # Lines
+        self.eq_curve_equity = self.eq_plot.plot([], [], pen=pg.mkPen(width=2), name="Equity")
+        self.eq_curve_balance = self.eq_plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.PenStyle.DashLine), name="Balance")
+        self.eq_curve_peak = self.eq_plot.plot([], [], pen=pg.mkPen(width=1), name="Peak Equity")
+
+        port_layout.addWidget(self.eq_plot)
+
+        port_layout.addStretch(1)
+        tabs.addTab(port_tab, "Portfolio")
+
         split.addWidget(right)
         split.setSizes([740, 410])
 
@@ -157,6 +214,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pos_timer = QtCore.QTimer(self)
         self.pos_timer.setInterval(2000)  # ms
         self.pos_timer.timeout.connect(self.refresh_positions)
+        self.pos_timer.timeout.connect(self.refresh_portfolio)
         self.pos_timer.start()
 
         # Init MT5 and bot
@@ -210,6 +268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_refresh.clicked.connect(self.refresh_positions)
 
         self.refresh_positions()
+        self.refresh_portfolio()
 
     @QtCore.Slot()
     def start_bot(self):
@@ -319,6 +378,85 @@ class MainWindow(QtWidgets.QMainWindow):
         # If the currently selected symbol matches, refresh UI
         if self.cmb_symbol.currentText() == sym:
             self.render_debug(sym)
+
+    @QtCore.Slot()
+    def refresh_portfolio(self):
+        s = get_account_summary()
+        if not s.get("ok"):
+            self.lbl_account.setText(f"Account: ERROR - {s.get('error')}")
+            return
+
+        cur = s.get("currency", "")
+        self.lbl_account.setText(f"Account: {s.get('login')} @ {s.get('server')} ({cur})")
+
+        bal = float(s.get("balance", 0.0) or 0.0)
+        eq  = float(s.get("equity", 0.0) or 0.0)
+        pnl = float(s.get("profit", 0.0) or 0.0)
+        m   = float(s.get("margin", 0.0) or 0.0)
+        fm  = float(s.get("margin_free", 0.0) or 0.0)
+        ml  = float(s.get("margin_level", 0.0) or 0.0)
+        lev = int(s.get("leverage", 0) or 0)
+
+        # Risk used (% of equity tied up in margin)
+        risk_used = (m / eq) * 100.0 if eq > 0 else 0.0
+
+        # --- Labels ---
+        self.v_balance.setText(f"{bal:.2f} {cur}")
+        self.v_equity.setText(f"{eq:.2f} {cur}")
+
+        pnl_color = "darkgreen" if pnl > 0 else "darkred" if pnl < 0 else "gray"
+        self.v_profit.setText(f"<span style='color:{pnl_color}; font-weight:600'>{pnl:.2f} {cur}</span>")
+
+        self.v_margin.setText(f"{m:.2f} {cur}")
+        self.v_free_margin.setText(f"{fm:.2f} {cur}")
+        self.v_margin_level.setText(f"{ml:.2f}")
+        self.v_leverage.setText(f"1:{lev}")
+
+        # Risk Used color
+        if risk_used < 10:
+            ru_color = "darkgreen"
+        elif risk_used < 30:
+            ru_color = "orange"
+        else:
+            ru_color = "darkred"
+        self.v_risk_used.setText(f"<span style='color:{ru_color}; font-weight:600'>{risk_used:.2f}%</span>")
+
+        # --- Equity curve update (append only on change) ---
+        if hasattr(self, "eq_curve_equity"):
+            last = self.eq_last
+            cur_pair = (round(eq, 2), round(bal, 2))  # rounding avoids tiny float noise
+
+            if last != cur_pair:
+                self.eq_last = cur_pair
+
+                now = time.time()
+                self.eq_t.append(now)
+                self.eq_equity.append(eq)
+                self.eq_balance.append(bal)
+
+                t0 = self.eq_t[0]
+                x = [t - t0 for t in self.eq_t]
+
+                self.eq_curve_equity.setData(x, list(self.eq_equity))
+                self.eq_curve_balance.setData(x, list(self.eq_balance))
+
+                # --- Peak equity (drawdown reference) ---
+                peak_series = []
+                peak = float("-inf")
+                for v in self.eq_equity:
+                    if v > peak:
+                        peak = v
+                    peak_series.append(peak)
+
+                self.eq_curve_peak.setData(x, peak_series)
+
+                # Optional: show drawdown in title
+                dd = peak - eq
+                dd_pct = (dd / peak * 100.0) if peak > 0 else 0.0
+                self.eq_plot.setTitle(f"Equity / Balance | Equity: {eq:.2f} {cur} | DD: {dd:.2f} ({dd_pct:.2f}%)")
+
+                self.eq_plot.enableAutoRange(axis="y", enable=True)
+                self.eq_plot.setTitle(f"Equity / Balance (Equity: {eq:.2f} {cur})")
 
     def _styled_item(self, text: str, signal: str | None = None) -> QtWidgets.QTableWidgetItem:
         item = QtWidgets.QTableWidgetItem(text)

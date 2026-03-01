@@ -1,0 +1,3 @@
+Trading Bot Version: 0.5
+Checkpoint: GUI Dashboard + Strategy Debug Panel
+Date: 2026-03-01
