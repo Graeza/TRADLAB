@@ -23,7 +23,7 @@ from strategies.ml_strategy import MLStrategy
 from config.settings import (
     SYMBOL_LIST, TIMEFRAME_LIST, PRIMARY_TIMEFRAME, LOOP_SLEEP_SECONDS,
     DB_PATH, USE_ML_STRATEGY, ML_MODEL_PATH,
-    ENSEMBLE_MIN_CONF, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS
+    ENSEMBLE_MIN_CONF, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS, REGIME_WEIGHT_MULTIPLIERS
 )
 
 from risk_manager import RiskManager
@@ -147,9 +147,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_final = QtWidgets.QLabel("Final: —")
         dbg_layout.addWidget(self.lbl_final)
 
-        self.tbl_debug = QtWidgets.QTableWidget(0, 4)
-        self.tbl_debug.setHorizontalHeaderLabels(["Strategy", "Signal", "Confidence", "Meta"])
-        self.tbl_debug.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.tbl_debug = QtWidgets.QTableWidget(0, 5)
+        self.tbl_debug.setHorizontalHeaderLabels(["Strategy", "Signal", "Confidence", "Eff W", "Meta"])
+
+        header = self.tbl_debug.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
+
         dbg_layout.addWidget(self.tbl_debug)
 
         tabs.addTab(dbg_tab, "Strategy Debug")
@@ -200,6 +207,17 @@ class MainWindow(QtWidgets.QMainWindow):
         port_layout.addStretch(1)
         tabs.addTab(port_tab, "Portfolio")
 
+        # --- Tab 4: Performance ---
+        perf_tab = QtWidgets.QWidget()
+        perf_layout = QtWidgets.QVBoxLayout(perf_tab)
+
+        self.tbl_perf = QtWidgets.QTableWidget(0, 4)
+        self.tbl_perf.setHorizontalHeaderLabels(["Name", "N", "Win %", "Avg Ret"])
+        self.tbl_perf.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        perf_layout.addWidget(self.tbl_perf)
+
+        tabs.addTab(perf_tab, "Performance")
+
         split.addWidget(right)
         split.setSizes([740, 410])
 
@@ -215,6 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pos_timer.setInterval(2000)  # ms
         self.pos_timer.timeout.connect(self.refresh_positions)
         self.pos_timer.timeout.connect(self.refresh_portfolio)
+        self.pos_timer.timeout.connect(self.refresh_performance)
         self.pos_timer.start()
 
         # Init MT5 and bot
@@ -236,7 +255,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.log.write("[ML] No model found — running without ML")
 
-        ensemble = EnsembleEngine(strategies, weights=STRATEGY_WEIGHTS, min_conf=ENSEMBLE_MIN_CONF)
+        ensemble = EnsembleEngine(strategies, weights=STRATEGY_WEIGHTS, min_conf=ENSEMBLE_MIN_CONF,regime_multipliers=REGIME_WEIGHT_MULTIPLIERS)
         risk = RiskManager()
         executor = TradeExecutor()
 
@@ -258,7 +277,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda _: self.log.write(f"[UI] Allow New Trades = {self.chk_allow.isChecked()}")
         )
         self.controller = BotController(self.orch)
-
+        # Trigger initial debug view
+        self.render_debug(self.cmb_symbol.currentText())
         # Wire buttons
         self.btn_start.clicked.connect(self.start_bot)
         self.btn_stop.clicked.connect(self.stop_bot)
@@ -269,7 +289,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.refresh_positions()
         self.refresh_portfolio()
-
+        self.refresh_performance()
+        
     @QtCore.Slot()
     def start_bot(self):
         self.controller.start(sleep_s=LOOP_SLEEP_SECONDS)
@@ -478,16 +499,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if not payload:
             return
 
-        final = payload.get("final", {})
-        outputs = payload.get("outputs", [])
+        final = payload.get("final", {}) or {}
+        outputs = payload.get("outputs", []) or []
 
         # Optional: show highest-confidence strategies first
-        outputs = sorted(outputs, key=lambda o: float(o.get("confidence", 0.0)), reverse=True)
+        outputs = sorted(outputs, key=lambda o: float(o.get("confidence", 0.0) or 0.0), reverse=True)
 
+        # Final signal/conf
         final_sig = str(final.get("signal", "—")).upper()
         final_conf = float(final.get("confidence", 0.0) or 0.0)
-        self.lbl_final.setText(f"Final: {final_sig} (conf={final_conf:.2f})")
 
+        # Regime info
+        reg = final.get("regime", {}) or {}
+        trend = str(reg.get("trend", "—"))
+        vol = str(reg.get("vol", "—"))
+        adx = float(reg.get("adx", 0.0) or 0.0)
+        atrp = float(reg.get("atr_pct", 0.0) or 0.0)
+
+        # Single label update (includes regime)
+        self.lbl_final.setText(
+            f"Final: {final_sig} (conf={final_conf:.2f}) | "
+            f"Regime: {trend}/{vol} | ADX={adx:.1f} ATR%={atrp * 100:.2f}%"
+        )
+
+        # Color final label
         if final_sig == "BUY":
             self.lbl_final.setStyleSheet("font-weight: 700; color: darkgreen;")
         elif final_sig == "SELL":
@@ -495,6 +530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.lbl_final.setStyleSheet("font-weight: 700; color: dimgray;")
 
+        # Table
         self.tbl_debug.setRowCount(0)
 
         for o in outputs:
@@ -503,15 +539,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
             name = str(o.get("name", ""))
             sig = str(o.get("signal", "")).upper()
-            conf = f"{float(o.get('confidence', 0.0)):.2f}"
-            meta = str(o.get("meta", {}))
+            conf = f"{float(o.get('confidence', 0.0) or 0.0):.2f}"
 
-            # ✅ These must be INSIDE the loop
+            meta_dict = o.get("meta") or {}
+            eff_w = float(meta_dict.get("effective_weight", 1.0) or 1.0)
+
             self.tbl_debug.setItem(r, 0, self._styled_item(name))
             self.tbl_debug.setItem(r, 1, self._styled_item(sig, signal=sig))
             self.tbl_debug.setItem(r, 2, self._styled_item(conf, signal=sig))
-            self.tbl_debug.setItem(r, 3, self._styled_item(meta))
+            # Effective weight coloring
+            w_item = QtWidgets.QTableWidgetItem(f"{eff_w:.2f}")
+            w_item.setToolTip(
+                f"Effective Weight\nBase × Trend × Volatility\n= {eff_w:.2f}"
+            )
 
+            if eff_w > 1.05:
+                w_item.setForeground(QtCore.Qt.GlobalColor.darkGreen)   # boosted
+            elif eff_w < 0.95:
+                w_item.setForeground(QtCore.Qt.GlobalColor.darkRed)     # suppressed
+            else:
+                w_item.setForeground(QtCore.Qt.GlobalColor.darkGray)    # neutral
+
+            w_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+            self.tbl_debug.setItem(r, 3, w_item)
+            self.tbl_debug.setItem(r, 4, self._styled_item(str(meta_dict)))
+    
+    @QtCore.Slot()
+    def refresh_performance(self):
+        # orchestrator runs in a worker thread, but reading small dicts is fine;
+        # if you want perfect thread-safety later, we can emit via a Qt signal.
+        rows = self.orch.perf.summary_rows()
+
+        self.tbl_perf.setRowCount(0)
+        for row in rows:
+            r = self.tbl_perf.rowCount()
+            self.tbl_perf.insertRow(r)
+
+            name = str(row["name"])
+            n = str(row["n"])
+            win = f"{row['win_rate']*100:.1f}"
+            avg = f"{row['avg_ret']*100:.3f}%"  # percent
+
+            self.tbl_perf.setItem(r, 0, QtWidgets.QTableWidgetItem(name))
+            self.tbl_perf.setItem(r, 1, QtWidgets.QTableWidgetItem(n))
+            self.tbl_perf.setItem(r, 2, QtWidgets.QTableWidgetItem(win))
+            self.tbl_perf.setItem(r, 3, QtWidgets.QTableWidgetItem(avg))
 def run():
     app = QtWidgets.QApplication([])
     w = MainWindow()

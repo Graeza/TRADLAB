@@ -5,7 +5,9 @@ from typing import Callable, Optional, Any
 from core.data_pipeline import DataPipeline
 from core.ensemble import EnsembleEngine
 from core.database import MarketDatabase
+from core.performance_tracker import PerformanceTracker
 from core.labeling import make_labels_from_bars
+from utils.regime import detect_regime
 
 class Orchestrator:
     def __init__(self, pipeline: DataPipeline, ensemble: EnsembleEngine, risk_manager, executor, db: MarketDatabase,
@@ -23,6 +25,7 @@ class Orchestrator:
         self.log = log or (lambda s: print(s, flush=True))
         self.allow_new_trades_getter = allow_new_trades_getter or (lambda: True)
         self.decision_callback = decision_callback
+        self.perf = PerformanceTracker()
 
     def run_forever(self, sleep_s: int = 300, stop_event: Optional[threading.Event] = None):
         stop_event = stop_event or threading.Event()
@@ -35,12 +38,29 @@ class Orchestrator:
                 try:
                     data_by_tf = self.pipeline.update_symbol(symbol, self.timeframes)
 
+                    primary_df = data_by_tf.get(self.primary_tf)
+                    regime = detect_regime(primary_df) if primary_df is not None else {"trend":"UNKNOWN","vol":"UNKNOWN"}
+
                     if self.primary_tf not in data_by_tf:
                         self.log(f"[WARN] {symbol}: no primary timeframe data")
                         continue
 
-                    final_signal, outputs = self.ensemble.run(data_by_tf)
+                    final_signal, outputs = self.ensemble.run(data_by_tf, regime=regime)
+                    primary_df = data_by_tf.get(self.primary_tf)
+                    self.perf.add_prediction(
+                        symbol=symbol,
+                        df_primary=primary_df,
+                        horizon_bars=self.label_horizon_bars,
+                        final=final_signal,
+                        outputs=outputs,
+                    )
+
+                    # try to resolve older predictions now that we have more bars
+                    self.perf.update_with_bars(symbol, primary_df)
                     
+                    if isinstance(final_signal, dict):
+                        final_signal["regime"] = regime
+
                     # Emit structured decision event (GUI can subscribe)
                     if self.decision_callback:
                         try:

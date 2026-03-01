@@ -46,3 +46,30 @@ ALLOW_NEW_TRADES_DEFAULT = True   # GUI can override at runtime
 login = int(kr.get_password("mt5", "login"))
 server = kr.get_password("mt5", "server")
 password = kr.get_password("mt5", "password")
+
+# --- Regime gating multipliers (for ensemble weighting adjustments) ---
+REGIME_WEIGHT_MULTIPLIERS = {
+    # Trend vs Range
+    "TREND": {
+        "RSI_EMA": 0.7,
+        "BREAKOUT": 1.3,
+        "ML": 1.0,
+    },
+    "RANGE": {
+        "RSI_EMA": 1.3,
+        "BREAKOUT": 0.7,
+        "ML": 1.0,
+    },
+
+    # Volatility
+    "HIGH_VOL": {
+        "RSI_EMA": 0.9,
+        "BREAKOUT": 1.1,
+        "ML": 1.0,
+    },
+    "LOW_VOL": {
+        "RSI_EMA": 1.1,
+        "BREAKOUT": 0.9,
+        "ML": 1.0,
+    },
+}

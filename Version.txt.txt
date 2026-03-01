@@ -1,3 +1,25 @@
 Trading Bot Version: 0.5
 Checkpoint: GUI Dashboard + Strategy Debug Panel
 Date: 2026-03-01
+
+Trading Bot Version: 0.6
+Checkpoint: Dashboard + Equity Monitoring
+Date: 2026-03-01
+Features:
+- Portfolio panel
+- Equity curve
+- Drawdown monitoring
+- Strategy debug panel
+- Risk monitoring
+
+Trading Bot Version: 0.7
+Checkpoint: Regime Detection + Regime Weighted Ensemble + Performance Tracker
+Date: 2026-03-01
+
+Major Features
+- Multi-strategy ensemble
+- Regime detection
+- Regime-aware strategy weighting
+- Strategy debug dashboard
+- Portfolio dashboard with equity curve
+- Strategy performance tracker

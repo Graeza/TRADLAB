@@ -18,7 +18,7 @@ from strategies.ml_strategy import MLStrategy
 from config.settings import (
     SYMBOL_LIST, TIMEFRAME_LIST, PRIMARY_TIMEFRAME, LOOP_SLEEP_SECONDS,
     DB_PATH, USE_ML_STRATEGY, ML_MODEL_PATH,
-    ENSEMBLE_MIN_CONF, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS
+    ENSEMBLE_MIN_CONF, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS, REGIME_WEIGHT_MULTIPLIERS
 )
 
 # keep your existing modules compatible
@@ -33,9 +33,9 @@ def build_strategies():
     if USE_ML_STRATEGY and os.path.exists(ML_MODEL_PATH):
             model = joblib.load(ML_MODEL_PATH)
             strategies.append(MLStrategy(model))
-        else:
-            print("ML model not found — running without ML strategy.")
-return strategies
+    else:
+        print("ML model not found — running without ML strategy.")
+    return strategies
 
 def main():
     initialize_mt5()
@@ -45,7 +45,7 @@ def main():
     pipeline = DataPipeline(fetcher, db)
 
     strategies = build_strategies()
-    ensemble = EnsembleEngine(strategies, weights=STRATEGY_WEIGHTS, min_conf=ENSEMBLE_MIN_CONF)
+    ensemble = EnsembleEngine(strategies, weights=STRATEGY_WEIGHTS, min_conf=ENSEMBLE_MIN_CONF, regime_multipliers=REGIME_WEIGHT_MULTIPLIERS)
 
     risk = RiskManager()
     executor = TradeExecutor()
