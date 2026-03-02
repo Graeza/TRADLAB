@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 import queue
+import subprocess
+import sys
 import joblib
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
@@ -30,6 +33,40 @@ from risk_manager import RiskManager
 from trade_executor import TradeExecutor
 from utils.mt5_positions import close_positions, list_positions
 from utils.mt5_account import get_account_summary
+
+
+class TrainWorker(QtCore.QObject):
+    line = QtCore.Signal(str)
+    finished = QtCore.Signal(bool, str)  # (ok, message)
+
+    def __init__(self, steps: list[list[str]]):
+        super().__init__()
+        self.steps = steps
+
+    @QtCore.Slot()
+    def run(self):
+        try:
+            for cmd in self.steps:
+                self.line.emit("[TRAIN] " + " ".join(cmd))
+                p = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                assert p.stdout is not None
+                for ln in p.stdout:
+                    ln = ln.rstrip("\n")
+                    if ln:
+                        self.line.emit(ln)
+                rc = p.wait()
+                if rc != 0:
+                    self.finished.emit(False, f"Command failed (exit={rc}): {' '.join(cmd)}")
+                    return
+            self.finished.emit(True, "Training completed")
+        except Exception as e:
+            self.finished.emit(False, f"Training error: {e}")
 
 class LogPump(QtCore.QObject):
     line = QtCore.Signal(str)
@@ -211,12 +248,68 @@ class MainWindow(QtWidgets.QMainWindow):
         perf_tab = QtWidgets.QWidget()
         perf_layout = QtWidgets.QVBoxLayout(perf_tab)
 
-        self.tbl_perf = QtWidgets.QTableWidget(0, 4)
-        self.tbl_perf.setHorizontalHeaderLabels(["Name", "N", "Win %", "Avg Ret"])
+        self.lbl_perf_status = QtWidgets.QLabel("Performance: —")
+        self.lbl_perf_status.setStyleSheet("font-weight:600; color: gray;")
+        perf_layout.addWidget(self.lbl_perf_status)
+
+        self.tbl_perf = QtWidgets.QTableWidget(0, 5)
+        self.tbl_perf.setHorizontalHeaderLabels(["Name", "N", "Win %", "Avg Ret", "Expectancy"])
         self.tbl_perf.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         perf_layout.addWidget(self.tbl_perf)
 
         tabs.addTab(perf_tab, "Performance")
+
+        # --- Tab 5: ML Training ---
+        train_tab = QtWidgets.QWidget()
+        train_layout = QtWidgets.QVBoxLayout(train_tab)
+
+        form = QtWidgets.QFormLayout()
+        train_layout.addLayout(form)
+
+        self.train_symbol = QtWidgets.QComboBox()
+        self.train_symbol.addItems(SYMBOL_LIST)
+        form.addRow("Symbol", self.train_symbol)
+
+        self.train_timeframe = QtWidgets.QComboBox()
+        # Use the configured timeframe ints directly
+        for tf in TIMEFRAME_LIST:
+            self.train_timeframe.addItem(str(tf), tf)
+        form.addRow("Timeframe", self.train_timeframe)
+
+        self.train_csv = QtWidgets.QLineEdit("dataset.csv")
+        form.addRow("Dataset CSV", self.train_csv)
+
+        self.train_model_version = QtWidgets.QLineEdit(f"ml_{datetime.utcnow().strftime('%Y-%m-%d')}")
+        form.addRow("Model version", self.train_model_version)
+
+        self.train_schema_version = QtWidgets.QSpinBox()
+        self.train_schema_version.setRange(1, 10_000)
+        self.train_schema_version.setValue(1)
+        form.addRow("Schema version", self.train_schema_version)
+
+        self.train_strict_schema = QtWidgets.QCheckBox("Strict schema (refuse to trade on drift)")
+        self.train_strict_schema.setChecked(True)
+        train_layout.addWidget(self.train_strict_schema)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_export_ds = QtWidgets.QPushButton("Export Dataset")
+        self.btn_train_ml = QtWidgets.QPushButton("Train Model")
+        self.btn_export_train = QtWidgets.QPushButton("Export + Train")
+        self.btn_reload_ml = QtWidgets.QPushButton("Reload ML Model")
+        self.btn_reload_ml.setEnabled(False)
+        btn_row.addWidget(self.btn_export_ds)
+        btn_row.addWidget(self.btn_train_ml)
+        btn_row.addWidget(self.btn_export_train)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_reload_ml)
+        train_layout.addLayout(btn_row)
+
+        self.lbl_train_status = QtWidgets.QLabel("Training: —")
+        self.lbl_train_status.setStyleSheet("font-weight:600; color: gray;")
+        train_layout.addWidget(self.lbl_train_status)
+
+        train_layout.addStretch(1)
+        tabs.addTab(train_tab, "ML Training")
 
         split.addWidget(right)
         split.setSizes([740, 410])
@@ -240,31 +333,27 @@ class MainWindow(QtWidgets.QMainWindow):
         initialize_mt5()
         self.lbl_status.setText("MT5 connected")
 
-        db = MarketDatabase(DB_PATH)
-        fetcher = DataFetcher()
-        pipeline = DataPipeline(fetcher, db)
+        self.db = MarketDatabase(DB_PATH)
+        self.fetcher = DataFetcher()
+        self.pipeline = DataPipeline(self.fetcher, self.db)
 
-        strategies = [RSIEMAStrategy(), BreakoutStrategy()]
-        if USE_ML_STRATEGY and os.path.exists(ML_MODEL_PATH):
-            try:
-                model = joblib.load(ML_MODEL_PATH)
-                strategies.append(MLStrategy(model))
-                self.log.write(f"[ML] Loaded model: {ML_MODEL_PATH}")
-            except Exception as e:
-                self.log.write(f"[ML] Failed to load model: {e}")
-        else:
-            self.log.write("[ML] No model found — running without ML")
+        strategies = self._build_strategies()
 
-        ensemble = EnsembleEngine(strategies, weights=STRATEGY_WEIGHTS, min_conf=ENSEMBLE_MIN_CONF,regime_multipliers=REGIME_WEIGHT_MULTIPLIERS)
-        risk = RiskManager()
-        executor = TradeExecutor()
+        self.ensemble = EnsembleEngine(
+            strategies,
+            weights=STRATEGY_WEIGHTS,
+            min_conf=ENSEMBLE_MIN_CONF,
+            regime_multipliers=REGIME_WEIGHT_MULTIPLIERS,
+        )
+        self.risk = RiskManager()
+        self.executor = TradeExecutor()
 
         self.orch = Orchestrator(
-            pipeline=pipeline,
-            ensemble=ensemble,
-            risk_manager=risk,
-            executor=executor,
-            db=db,
+            pipeline=self.pipeline,
+            ensemble=self.ensemble,
+            risk_manager=self.risk,
+            executor=self.executor,
+            db=self.db,
             symbols=SYMBOL_LIST,
             timeframes=TIMEFRAME_LIST,
             primary_tf=PRIMARY_TIMEFRAME,
@@ -287,10 +376,164 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_close_all.clicked.connect(lambda: self.close_mode("all"))
         self.btn_refresh.clicked.connect(self.refresh_positions)
 
+        # Training buttons
+        self.btn_export_ds.clicked.connect(self.export_dataset)
+        self.btn_train_ml.clicked.connect(self.train_model)
+        self.btn_export_train.clicked.connect(self.export_and_train)
+        self.btn_reload_ml.clicked.connect(self.reload_ml_model)
+
         self.refresh_positions()
         self.refresh_portfolio()
         self.refresh_performance()
-        
+
+        # training thread holder
+        self._train_thread = None  # type: QtCore.QThread | None
+
+    def _build_strategies(self):
+        strategies = [RSIEMAStrategy(), BreakoutStrategy()]
+
+        if USE_ML_STRATEGY and os.path.exists(ML_MODEL_PATH):
+            try:
+                bundle = joblib.load(ML_MODEL_PATH)
+                if isinstance(bundle, dict) and "model" in bundle:
+                    strategies.append(
+                        MLStrategy(
+                            bundle["model"],
+                            feature_cols=bundle.get("feature_cols"),
+                            model_version=bundle.get("model_version") or bundle.get("version"),
+                            schema_version=bundle.get("schema_version", 1),
+                            strict_schema=bundle.get("strict_schema", True),
+                            class_to_signal=bundle.get("class_to_signal"),
+                            fillna_value=bundle.get("fillna_value"),
+                        )
+                    )
+                else:
+                    strategies.append(MLStrategy(bundle))
+                self.log.write(f"[ML] Loaded model: {ML_MODEL_PATH}")
+            except Exception as e:
+                self.log.write(f"[ML] Failed to load model: {e}")
+        else:
+            self.log.write("[ML] No model found — running without ML")
+
+        return strategies
+
+    def _run_training_steps(self, steps: list[list[str]]):
+        if self._train_thread is not None:
+            self.log.write("[TRAIN] Training already running")
+            return
+
+        self.lbl_train_status.setText("Training: running…")
+        self.btn_export_ds.setEnabled(False)
+        self.btn_train_ml.setEnabled(False)
+        self.btn_export_train.setEnabled(False)
+        self.btn_reload_ml.setEnabled(False)
+
+        worker = TrainWorker(steps)
+        th = QtCore.QThread(self)
+        worker.moveToThread(th)
+
+        worker.line.connect(self.log.write)
+
+        def _done(ok: bool, msg: str):
+            self.lbl_train_status.setText(f"Training: {'OK' if ok else 'FAILED'} — {msg}")
+            self.btn_export_ds.setEnabled(True)
+            self.btn_train_ml.setEnabled(True)
+            self.btn_export_train.setEnabled(True)
+            self.btn_reload_ml.setEnabled(ok and os.path.exists(ML_MODEL_PATH))
+            th.quit()
+            th.wait(2000)
+            self._train_thread = None
+
+        worker.finished.connect(_done)
+        th.started.connect(worker.run)
+
+        self._train_thread = th
+        th.start()
+
+    def _script_path(self, filename: str) -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", filename))
+
+    @QtCore.Slot()
+    def export_dataset(self):
+        symbol = self.train_symbol.currentText()
+        tf = int(self.train_timeframe.currentData())
+        out_csv = self.train_csv.text().strip() or "dataset.csv"
+
+        steps = [[
+            sys.executable,
+            self._script_path("export_dataset.py"),
+            "--symbol", symbol,
+            "--timeframe", str(tf),
+            "--out", out_csv,
+        ]]
+        self._run_training_steps(steps)
+
+    @QtCore.Slot()
+    def train_model(self):
+        out_csv = self.train_csv.text().strip() or "dataset.csv"
+        model_version = self.train_model_version.text().strip() or f"ml_{datetime.utcnow().strftime('%Y-%m-%d')}"
+        schema_version = int(self.train_schema_version.value())
+        strict = self.train_strict_schema.isChecked()
+
+        cmd = [
+            sys.executable,
+            self._script_path("train_model.py"),
+            "--csv", out_csv,
+            "--model-version", model_version,
+            "--schema-version", str(schema_version),
+        ]
+        if strict:
+            cmd.append("--strict-schema")
+
+        self._run_training_steps([cmd])
+
+    @QtCore.Slot()
+    def export_and_train(self):
+        symbol = self.train_symbol.currentText()
+        tf = int(self.train_timeframe.currentData())
+        out_csv = self.train_csv.text().strip() or "dataset.csv"
+        model_version = self.train_model_version.text().strip() or f"ml_{datetime.utcnow().strftime('%Y-%m-%d')}"
+        schema_version = int(self.train_schema_version.value())
+        strict = self.train_strict_schema.isChecked()
+
+        export_cmd = [
+            sys.executable,
+            self._script_path("export_dataset.py"),
+            "--symbol", symbol,
+            "--timeframe", str(tf),
+            "--out", out_csv,
+        ]
+        train_cmd = [
+            sys.executable,
+            self._script_path("train_model.py"),
+            "--csv", out_csv,
+            "--model-version", model_version,
+            "--schema-version", str(schema_version),
+        ]
+        if strict:
+            train_cmd.append("--strict-schema")
+
+        self._run_training_steps([export_cmd, train_cmd])
+
+    @QtCore.Slot()
+    def reload_ml_model(self):
+        if getattr(self.controller, "is_running", False):
+            self.log.write("[ML] Stop the bot before reloading the model")
+            return
+        try:
+            strategies = self._build_strategies()
+            self.ensemble = EnsembleEngine(
+                strategies,
+                weights=STRATEGY_WEIGHTS,
+                min_conf=ENSEMBLE_MIN_CONF,
+                regime_multipliers=REGIME_WEIGHT_MULTIPLIERS,
+            )
+            # hot swap on orchestrator (safe because bot is stopped)
+            self.orch.ensemble = self.ensemble
+            self.log.write("[ML] Reloaded strategies/ensemble")
+        except Exception as e:
+            self.log.write(f"[ML] Reload failed: {e}")
+
     @QtCore.Slot()
     def start_bot(self):
         self.controller.start(sleep_s=LOOP_SLEEP_SECONDS)
@@ -567,24 +810,62 @@ class MainWindow(QtWidgets.QMainWindow):
     
     @QtCore.Slot()
     def refresh_performance(self):
-        # orchestrator runs in a worker thread, but reading small dicts is fine;
-        # if you want perfect thread-safety later, we can emit via a Qt signal.
         rows = self.orch.perf.summary_rows()
+        pending_total = sum(len(v) for v in self.orch.perf.pending.values())
+        final_n = int(self.orch.perf.stats_final.get("n", 0))
 
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.lbl_perf_status.setText(
+            f"Performance: scored={final_n} | pending={pending_total} | "
+            f"horizon={LABEL_HORIZON_BARS} bars | updated={ts}"
+        )
+
+        self.tbl_perf.setUpdatesEnabled(False)
         self.tbl_perf.setRowCount(0)
+
         for row in rows:
             r = self.tbl_perf.rowCount()
             self.tbl_perf.insertRow(r)
 
             name = str(row["name"])
             n = str(row["n"])
-            win = f"{row['win_rate']*100:.1f}"
-            avg = f"{row['avg_ret']*100:.3f}%"  # percent
+            win = f"{row['win_rate'] * 100:.1f}"
+            avg = f"{row['avg_ret'] * 100:.3f}%"  # percent
+            exp = f"{row['expectancy'] * 100:.3f}%"
 
             self.tbl_perf.setItem(r, 0, QtWidgets.QTableWidgetItem(name))
             self.tbl_perf.setItem(r, 1, QtWidgets.QTableWidgetItem(n))
-            self.tbl_perf.setItem(r, 2, QtWidgets.QTableWidgetItem(win))
+            # Win% with color
+            win_rate = float(row["win_rate"])
+            win_item = QtWidgets.QTableWidgetItem(win)
+
+            if win_rate > 0.55:
+                win_item.setForeground(QtCore.Qt.GlobalColor.darkGreen)
+            elif win_rate < 0.45:
+                win_item.setForeground(QtCore.Qt.GlobalColor.darkRed)
+            else:
+                win_item.setForeground(QtCore.Qt.GlobalColor.darkGray)
+
+            win_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+            self.tbl_perf.setItem(r, 2, win_item)
             self.tbl_perf.setItem(r, 3, QtWidgets.QTableWidgetItem(avg))
+            exp_item = QtWidgets.QTableWidgetItem(exp)
+
+            exp_val = float(row["expectancy"])
+            if exp_val > 0:
+                exp_item.setForeground(QtCore.Qt.GlobalColor.darkGreen)
+            elif exp_val < 0:
+                exp_item.setForeground(QtCore.Qt.GlobalColor.darkRed)
+            else:
+                exp_item.setForeground(QtCore.Qt.GlobalColor.darkGray)
+
+            exp_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+            self.tbl_perf.setItem(r, 4, exp_item)
+            
+        self.tbl_perf.setUpdatesEnabled(True)
+
 def run():
     app = QtWidgets.QApplication([])
     w = MainWindow()

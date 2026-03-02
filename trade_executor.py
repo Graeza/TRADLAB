@@ -25,6 +25,9 @@ class TradeExecutor:
         symbol = params["symbol"]
         action = params["action"]
         requested_lot = params["lot_size"]
+        sl = params.get("sl")
+        tp = params.get("tp")
+        deviation = int(params.get("deviation") or 20)
 
         # Normalize lot size to valid Deriv volume
         lot = self._normalize_volume(symbol, requested_lot)
@@ -40,6 +43,9 @@ class TradeExecutor:
             "volume": lot,
             "type": order_type,
             "price": price,
+            "sl": float(sl) if sl is not None else 0.0,
+            "tp": float(tp) if tp is not None else 0.0,
+            "deviation": deviation,
             "magic": 123456,
             "comment": "ModularBot",
         }

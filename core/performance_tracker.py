@@ -20,6 +20,7 @@ class PendingPrediction:
     horizon_bars: int
     final: Dict[str, Any]
     outputs: List[Dict[str, Any]]  # StrategyOutput list
+    regime: Dict[str, Any]
 
 
 class PerformanceTracker:
@@ -40,6 +41,8 @@ class PerformanceTracker:
         # stats["RSI_EMA"] = {"n":..., "wins":..., "sum_ret":..., "sum_abs_ret":...}
         self.stats: Dict[str, Dict[str, float]] = {}
         self.stats_final: Dict[str, float] = {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0}
+        self.stats_by_regime: Dict[str, Dict[str, float]] = {}
+        self.stats_final_by_regime: Dict[str, Dict[str, float]] = {}
 
     def add_prediction(
         self,
@@ -51,6 +54,8 @@ class PerformanceTracker:
     ) -> None:
         if df_primary is None or df_primary.empty:
             return
+        
+        regime = dict(final.get("regime") or {})
 
         # Use the latest complete bar
         last = df_primary.iloc[-1]
@@ -69,6 +74,7 @@ class PerformanceTracker:
             horizon_bars=horizon_bars,
             final=dict(final),
             outputs=[dict(o) for o in outputs],
+            regime=regime
         ))
 
         # Trim
@@ -110,10 +116,17 @@ class PerformanceTracker:
             ret = (c1 - c0) / c0 if c0 != 0 else 0.0
             label = _direction_from_return(ret, eps=self.eps)
 
+            trend = str((p.regime or {}).get("trend", "UNKNOWN")).upper()
+            vol = str((p.regime or {}).get("vol", "UNKNOWN")).upper()
+            reg_key = f"{trend}/{vol}"
+
             # Update FINAL stats
             final_sig = str(p.final.get("signal", "HOLD")).upper()
             if final_sig != "HOLD":
                 self._update_bucket(self.stats_final, final_sig, label, ret)
+                # final by regime
+                b = self.stats_final_by_regime.setdefault(reg_key, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
+                self._update_bucket(b, final_sig, label, ret)
 
             # Update per-strategy stats
             for o in p.outputs:
@@ -123,7 +136,10 @@ class PerformanceTracker:
                     continue
                 bucket = self.stats.setdefault(name, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
                 self._update_bucket(bucket, sig, label, ret)
-
+                # by regime
+                rk_name = f"{name}@{reg_key}"
+                bucket_r = self.stats_by_regime.setdefault(rk_name, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
+                self._update_bucket(bucket_r, sig, label, ret)
             resolved_count += 1
 
         self.pending[symbol] = new_pending
@@ -138,21 +154,43 @@ class PerformanceTracker:
     def summary_rows(self) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
 
-        # Final first
+        # FINAL (global)
         rows.append(self._row_from_bucket("FINAL", self.stats_final))
 
-        # Strategies
+        # FINAL by regime
+        for reg_key, b in self.stats_final_by_regime.items():
+            rows.append(self._row_from_bucket(f"FINAL@{reg_key}", b))
+
+        # Strategies (global)
         for name, b in self.stats.items():
             rows.append(self._row_from_bucket(name, b))
 
-        # Sort by win rate then count
-        rows.sort(key=lambda r: (r["win_rate"], r["n"]), reverse=True)
+        # Strategies by regime
+        for name, b in self.stats_by_regime.items():
+            rows.append(self._row_from_bucket(name, b))
+
+        # Sort by expectancy then win_rate then n
+        rows.sort(key=lambda r: (r["expectancy"], r["win_rate"], r["n"]), reverse=True)
         return rows
 
     def _row_from_bucket(self, name: str, b: Dict[str, float]) -> Dict[str, Any]:
         n = float(b.get("n", 0.0))
         wins = float(b.get("wins", 0.0))
+        sum_ret = float(b.get("sum_ret", 0.0))
+        sum_abs = float(b.get("sum_abs_ret", 0.0))
+
         win_rate = (wins / n) if n > 0 else 0.0
-        avg_ret = (float(b.get("sum_ret", 0.0)) / n) if n > 0 else 0.0
-        avg_abs = (float(b.get("sum_abs_ret", 0.0)) / n) if n > 0 else 0.0
-        return {"name": name, "n": int(n), "win_rate": win_rate, "avg_ret": avg_ret, "avg_abs_ret": avg_abs}
+        avg_ret = (sum_ret / n) if n > 0 else 0.0
+        avg_abs = (sum_abs / n) if n > 0 else 0.0
+
+        # Expectancy ≈ average return per prediction
+        expectancy = avg_ret
+
+        return {
+            "name": name,
+            "n": int(n),
+            "win_rate": win_rate,
+            "avg_ret": avg_ret,
+            "avg_abs_ret": avg_abs,
+            "expectancy": expectancy,
+        }

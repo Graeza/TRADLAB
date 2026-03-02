@@ -31,8 +31,23 @@ def build_strategies():
         BreakoutStrategy(),
     ]
     if USE_ML_STRATEGY and os.path.exists(ML_MODEL_PATH):
-            model = joblib.load(ML_MODEL_PATH)
-            strategies.append(MLStrategy(model))
+            bundle = joblib.load(ML_MODEL_PATH)
+            # Support either a raw sklearn estimator or a saved bundle
+            # like {"model": estimator, "feature_cols": [...], "class_to_signal": {...}}
+            if isinstance(bundle, dict) and "model" in bundle:
+                strategies.append(
+                    MLStrategy(
+                            bundle["model"],
+                            feature_cols=bundle.get("feature_cols"),
+                            model_version=bundle.get("model_version") or bundle.get("version"),
+                            schema_version=bundle.get("schema_version", 1),
+                            strict_schema=bundle.get("strict_schema", True),
+                            class_to_signal=bundle.get("class_to_signal"),
+                            fillna_value=bundle.get("fillna_value"),
+                        )
+                )
+            else:
+                strategies.append(MLStrategy(bundle))
     else:
         print("ML model not found — running without ML strategy.")
     return strategies
