@@ -1,6 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
+import threading
+import copy
 import pandas as pd
 
 from strategies.base import StrategyOutput
@@ -37,6 +39,10 @@ class PerformanceTracker:
         self.max_pending_per_symbol = max_pending_per_symbol
         self.eps = eps
 
+        # Mutated by the bot thread and read by the GUI timer thread.
+        # Protect all reads/writes to pending/stats with this lock.
+        self._lock = threading.RLock()
+
         # symbol -> list[PendingPrediction]
         self.pending: Dict[str, List[PendingPrediction]] = {}
 
@@ -64,32 +70,38 @@ class PerformanceTracker:
         bar_time = int(last["time"])
         close = float(last["close"])
 
-        # Prevent duplicate predictions on the same bar_time
-        pend = self.pending.setdefault(symbol, [])
-        if pend and pend[-1].bar_time == bar_time:
-            return
+        with self._lock:
+            # Prevent duplicate predictions on the same bar_time
+            pend = self.pending.setdefault(symbol, [])
+            if pend and pend[-1].bar_time == bar_time:
+                return
 
-        pend.append(PendingPrediction(
-            symbol=symbol,
-            bar_time=bar_time,
-            close=close,
-            horizon_bars=horizon_bars,
-            final=dict(final),
-            outputs=[dict(o) for o in outputs],
-            regime=regime
-        ))
+            pend.append(PendingPrediction(
+                symbol=symbol,
+                bar_time=bar_time,
+                close=close,
+                horizon_bars=horizon_bars,
+                final=dict(final),
+                outputs=[dict(o) for o in outputs],
+                regime=regime
+            ))
 
-        # Trim
-        if len(pend) > self.max_pending_per_symbol:
-            self.pending[symbol] = pend[-self.max_pending_per_symbol:]
+            # Trim
+            if len(pend) > self.max_pending_per_symbol:
+                self.pending[symbol] = pend[-self.max_pending_per_symbol:]
 
     def update_with_bars(self, symbol: str, df_primary: pd.DataFrame) -> None:
         """
         Resolve any pending predictions where we now have bar_time + horizon_bars available.
         Assumes df_primary is sorted by time ascending.
         """
-        pend = self.pending.get(symbol)
-        if not pend or df_primary is None or df_primary.empty:
+        if df_primary is None or df_primary.empty:
+            return
+
+        # Copy the pending list under lock, do heavy work outside the lock.
+        with self._lock:
+            pend = list(self.pending.get(symbol) or [])
+        if not pend:
             return
 
         # Build an index: time -> row position
@@ -97,7 +109,6 @@ class PerformanceTracker:
         pos_by_time = {t: i for i, t in enumerate(times)}
         closes = df_primary["close"].astype(float).tolist()
 
-        resolved_count = 0
         new_pending: List[PendingPrediction] = []
 
         for p in pend:
@@ -122,29 +133,37 @@ class PerformanceTracker:
             vol = str((p.regime or {}).get("vol", "UNKNOWN")).upper()
             reg_key = f"{trend}/{vol}"
 
-            # Update FINAL stats
-            final_sig = str(p.final.get("signal", "HOLD")).upper()
-            if final_sig != "HOLD":
-                self._update_bucket(self.stats_final, final_sig, label, ret)
-                # final by regime
-                b = self.stats_final_by_regime.setdefault(reg_key, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
-                self._update_bucket(b, final_sig, label, ret)
+            # Update stats under lock (small critical section)
+            with self._lock:
+                # Update FINAL stats
+                final_sig = str(p.final.get("signal", "HOLD")).upper()
+                if final_sig != "HOLD":
+                    self._update_bucket(self.stats_final, final_sig, label, ret)
+                    # final by regime
+                    b = self.stats_final_by_regime.setdefault(
+                        reg_key,
+                        {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0},
+                    )
+                    self._update_bucket(b, final_sig, label, ret)
 
-            # Update per-strategy stats
-            for o in p.outputs:
-                name = str(o.get("name", "UNKNOWN"))
-                sig = str(o.get("signal", "HOLD")).upper()
-                if sig == "HOLD":
-                    continue
-                bucket = self.stats.setdefault(name, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
-                self._update_bucket(bucket, sig, label, ret)
-                # by regime
-                rk_name = f"{name}@{reg_key}"
-                bucket_r = self.stats_by_regime.setdefault(rk_name, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
-                self._update_bucket(bucket_r, sig, label, ret)
-            resolved_count += 1
+                # Update per-strategy stats
+                for o in p.outputs:
+                    name = str(o.get("name", "UNKNOWN"))
+                    sig = str(o.get("signal", "HOLD")).upper()
+                    if sig == "HOLD":
+                        continue
+                    bucket = self.stats.setdefault(name, {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0})
+                    self._update_bucket(bucket, sig, label, ret)
+                    # by regime
+                    rk_name = f"{name}@{reg_key}"
+                    bucket_r = self.stats_by_regime.setdefault(
+                        rk_name,
+                        {"n": 0.0, "wins": 0.0, "sum_ret": 0.0, "sum_abs_ret": 0.0},
+                    )
+                    self._update_bucket(bucket_r, sig, label, ret)
 
-        self.pending[symbol] = new_pending
+        with self._lock:
+            self.pending[symbol] = new_pending
 
     def _update_bucket(self, bucket: Dict[str, float], pred_sig: str, label_sig: str, ret: float) -> None:
         bucket["n"] += 1.0
@@ -154,26 +173,45 @@ class PerformanceTracker:
         bucket["sum_abs_ret"] += abs(ret)
 
     def summary_rows(self) -> List[Dict[str, Any]]:
+        # Take a consistent snapshot under lock, then format outside.
+        with self._lock:
+            stats_final = copy.deepcopy(self.stats_final)
+            stats_final_by_regime = copy.deepcopy(self.stats_final_by_regime)
+            stats = copy.deepcopy(self.stats)
+            stats_by_regime = copy.deepcopy(self.stats_by_regime)
+
         rows: List[Dict[str, Any]] = []
 
         # FINAL (global)
-        rows.append(self._row_from_bucket("FINAL", self.stats_final))
+        rows.append(self._row_from_bucket("FINAL", stats_final))
 
         # FINAL by regime
-        for reg_key, b in self.stats_final_by_regime.items():
+        for reg_key, b in stats_final_by_regime.items():
             rows.append(self._row_from_bucket(f"FINAL@{reg_key}", b))
 
         # Strategies (global)
-        for name, b in self.stats.items():
+        for name, b in stats.items():
             rows.append(self._row_from_bucket(name, b))
 
         # Strategies by regime
-        for name, b in self.stats_by_regime.items():
+        for name, b in stats_by_regime.items():
             rows.append(self._row_from_bucket(name, b))
 
         # Sort by expectancy then win_rate then n
         rows.sort(key=lambda r: (r["expectancy"], r["win_rate"], r["n"]), reverse=True)
         return rows
+
+    def pending_count(self) -> int:
+        """Thread-safe total pending predictions across all symbols."""
+        with self._lock:
+            return sum(len(v) for v in self.pending.values())
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Thread-safe snapshot for GUI/telemetry."""
+        return {
+            "rows": self.summary_rows(),
+            "pending_total": self.pending_count(),
+        }
 
     def _row_from_bucket(self, name: str, b: Dict[str, float]) -> Dict[str, Any]:
         n = float(b.get("n", 0.0))

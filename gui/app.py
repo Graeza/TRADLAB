@@ -1296,8 +1296,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def refresh_performance(self):
-        rows = self.orch.perf.summary_rows()
-        pending_total = sum(len(v) for v in self.orch.perf.pending.values())
+        snap = self.orch.perf.snapshot()
+        rows = snap.get("rows") or []
+        pending_total = int(snap.get("pending_total") or 0)
         self.lbl_perf_status.setText(f"Performance: {len(rows)} strategies | pending={pending_total}")
 
         self.tbl_perf.setRowCount(0)
@@ -1308,7 +1309,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(row.get("name")),
                 str(row.get("n")),
                 f"{float(row.get('win_rate', 0.0) or 0.0) * 100.0:.1f}%",
-                f"{float(row.get('avg_return', 0.0) or 0.0):.5f}",
+                f"{float(row.get('avg_ret', 0.0) or 0.0):.5f}",
                 f"{float(row.get('expectancy', 0.0) or 0.0):.5f}",
             ]
             for c, v in enumerate(vals):
