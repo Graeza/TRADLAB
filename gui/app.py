@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import queue
 import subprocess
 import sys
 import shutil
 from typing import Optional
 
+from backtest import report
 import joblib
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
@@ -182,6 +183,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = LogPump()
         self.decisions = {}  # symbol -> payload dict
 
+        self.bot_start_time: datetime | None = None
+        self.bot_stop_time: datetime | None = None
+
         # --- Equity curve history (last N points) ---
         self.eq_t = deque(maxlen=600)      # timestamps
         self.eq_equity = deque(maxlen=600)
@@ -210,6 +214,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "padding:2px 4px; border-radius:6px; font-weight:600; background:#555; color:white;"
         )
         self.btn_mt5_reconnect = QtWidgets.QPushButton("Reconnect MT5")
+        self.lbl_now = QtWidgets.QLabel("Time: —")
+        self.lbl_now.setStyleSheet("font-weight:600; color: gray;")
 
         self.btn_close_pos = QtWidgets.QPushButton("Close Positives")
         self.btn_close_neg = QtWidgets.QPushButton("Close Negatives")
@@ -221,6 +227,7 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.chk_allow)
         top.addWidget(self.lbl_mt5_badge)
         top.addWidget(self.btn_mt5_reconnect)
+        top.addWidget(self.lbl_now)
         top.addStretch(1)
         top.addWidget(self.btn_close_pos)
         top.addWidget(self.btn_close_neg)
@@ -490,6 +497,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_perf_status = QtWidgets.QLabel("Performance: —")
         self.lbl_perf_status.setStyleSheet("font-weight:600; color: gray;")
         perf_layout.addWidget(self.lbl_perf_status)
+        self.lbl_bot_start_time = QtWidgets.QLabel("Start Time: —")
+        self.lbl_session_duration = QtWidgets.QLabel("Session Duration: —")
+        self.lbl_bot_stop_time = QtWidgets.QLabel("Stop Time: —")
+       
+        perf_layout.addWidget(self.lbl_bot_start_time)
+        perf_layout.addWidget(self.lbl_session_duration)
+        perf_layout.addWidget(self.lbl_bot_stop_time)
+
 
         self.tbl_perf = QtWidgets.QTableWidget(0, 5)
         self.tbl_perf.setHorizontalHeaderLabels(["Name", "N", "Win %", "Avg Ret", "Expectancy"])
@@ -653,6 +668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pos_timer.timeout.connect(self.refresh_positions)
         self.pos_timer.timeout.connect(self.refresh_portfolio)
         self.pos_timer.timeout.connect(self.refresh_performance)
+        self.pos_timer.timeout.connect(self.refresh_clock)
         self.pos_timer.start()
 
         # --- Init MT5 (single-thread worker) and bot ---
@@ -733,6 +749,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_positions()
         self.refresh_portfolio()
         self.refresh_performance()
+        self.refresh_clock()
 
         self._train_thread = None
         self.bt_thread = None
@@ -1010,7 +1027,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.write(f"[EXP] Promote failed: {e}")
 
     # ---------- Backtest ----------
-
     @QtCore.Slot()
     def run_backtest(self):
         script = self._script_path("run_backtest.py")
@@ -1169,7 +1185,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Still, it’s safe to allow the user to click Reload only after training finishes.
         # (See recommended change below.)
 
-
     @QtCore.Slot()
     def export_and_train(self):
         symbol = self.train_symbol.currentText()
@@ -1211,7 +1226,6 @@ class MainWindow(QtWidgets.QMainWindow):
             train_cmd.append("--strict-schema")
 
         self._run_training_steps([export_cmd, train_cmd])
-
 
     @QtCore.Slot()
     def reload_ml_model(self):
@@ -1256,20 +1270,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_train_status.setText(f"Training: reload failed ({e})")
 
     # ---------- Bot control ----------
-
     @QtCore.Slot()
     def start_bot(self):
         self.controller.start(sleep_s=LOOP_SLEEP_SECONDS)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.log.write("[UI] Start pressed")
+
+        self.bot_start_time = datetime.now(timezone.utc)
+        self.bot_stop_time = None
+
+        self.lbl_bot_start_time.setText(self.bot_start_time.strftime("Start Time: %Y-%m-%d %H:%M:%S"))
+        self.lbl_bot_stop_time.setText("Stop Time: —")
+
+        self.log.write(f"[BOT] Started at {self.bot_start_time}")
 
     @QtCore.Slot()
     def stop_bot(self):
         self.controller.stop()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.log.write("[UI] Stop pressed")
+
+        self.bot_stop_time = datetime.now(timezone.utc)
+        self.lbl_bot_stop_time.setText(self.bot_stop_time.strftime("Stop Time: %Y-%m-%d %H:%M:%S"))
+
+        self.log.write(f"[BOT] Stopped at {self.bot_stop_time}")
+        report = self._build_session_trade_report()
+        self._show_session_trade_report(report)
 
     @QtCore.Slot()
     def reconnect_mt5(self):
@@ -1352,6 +1378,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.write(f"[EXEC_GUARD] Apply failed: {e}")
 
     # ---------- UI refreshers ----------
+    @QtCore.Slot()
+    def refresh_clock(self):
+        now = datetime.now()
+        self.lbl_now.setText(now.strftime("Time: %Y-%m-%d %H:%M:%S"))
 
     @QtCore.Slot()
     def refresh_positions(self):
@@ -1556,6 +1586,20 @@ class MainWindow(QtWidgets.QMainWindow):
         pending_total = sum(len(v) for v in self.orch.perf.pending.values())
         self.lbl_perf_status.setText(f"Performance: {len(rows)} strategies | pending={pending_total}")
 
+        self.lbl_bot_start_time.setText(
+            self.bot_start_time.strftime("Start Time: %Y-%m-%d %H:%M:%S")
+            if self.bot_start_time else "Start Time: —"
+        )
+
+        self.lbl_bot_stop_time.setText(
+            self.bot_stop_time.strftime("Stop Time: %Y-%m-%d %H:%M:%S")
+            if self.bot_stop_time else "Stop Time: —"
+        )
+
+        self.lbl_session_duration.setText(
+            f"Session Duration: {self._format_duration(self.bot_start_time, self.bot_stop_time)}"
+        )
+
         self.tbl_perf.setRowCount(0)
         for row in rows:
             r = self.tbl_perf.rowCount()
@@ -1585,6 +1629,171 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         finally:
             super().closeEvent(event)
+
+    def _build_session_trade_report(self) -> dict:
+        if not self.bot_start_time:
+            raise RuntimeError("No session start time recorded")
+
+        end_time = self.bot_stop_time or datetime.now(timezone.utc)
+
+        deals = self.mt5.history_deals_get(self.bot_start_time, end_time)
+        if deals is None:
+            err = self.mt5.last_error()
+            raise RuntimeError(f"history_deals_get failed: {err}")
+
+        # MT5 constants
+        DEAL_ENTRY_IN = getattr(self.mt5, "DEAL_ENTRY_IN", 0)
+        DEAL_ENTRY_OUT = getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
+        ORDER_TYPE_BUY = getattr(self.mt5, "ORDER_TYPE_BUY", 0)
+        ORDER_TYPE_SELL = getattr(self.mt5, "ORDER_TYPE_SELL", 1)
+
+        by_position: dict[int, dict] = {}
+
+        for d in deals:
+            position_id = int(getattr(d, "position_id", 0) or 0)
+            if position_id <= 0:
+                continue
+
+            row = by_position.setdefault(position_id, {
+                "position_id": position_id,
+                "symbol": str(getattr(d, "symbol", "")),
+                "side": "",
+                "open_time": None,
+                "close_time": None,
+                "volume": 0.0,
+                "open_price": None,
+                "close_price": None,
+                "profit": 0.0,
+                "commission": 0.0,
+                "swap": 0.0,
+                "fee": 0.0,
+                "net": 0.0,
+                "closed": False,
+            })
+
+            entry = int(getattr(d, "entry", -1))
+            dtype = int(getattr(d, "type", -1))
+            t = datetime.fromtimestamp(float(getattr(d, "time", 0)), tz=timezone.utc)
+
+            if entry == DEAL_ENTRY_IN:
+                row["open_time"] = row["open_time"] or t
+                row["volume"] = float(getattr(d, "volume", 0.0) or 0.0)
+                row["open_price"] = float(getattr(d, "price", 0.0) or 0.0)
+                if dtype == ORDER_TYPE_BUY:
+                    row["side"] = "BUY"
+                elif dtype == ORDER_TYPE_SELL:
+                    row["side"] = "SELL"
+
+            elif entry == DEAL_ENTRY_OUT:
+                row["close_time"] = t
+                row["close_price"] = float(getattr(d, "price", 0.0) or 0.0)
+                row["profit"] += float(getattr(d, "profit", 0.0) or 0.0)
+                row["commission"] += float(getattr(d, "commission", 0.0) or 0.0)
+                row["swap"] += float(getattr(d, "swap", 0.0) or 0.0)
+                row["fee"] += float(getattr(d, "fee", 0.0) or 0.0)
+                row["closed"] = True
+
+        trades = []
+        total_net = 0.0
+        buy_net = 0.0
+        sell_net = 0.0
+
+        for row in by_position.values():
+            if not row["closed"]:
+                continue
+
+            row["net"] = row["profit"] + row["commission"] + row["swap"] + row["fee"]
+            total_net += row["net"]
+
+            if row["side"] == "BUY":
+                buy_net += row["net"]
+            elif row["side"] == "SELL":
+                sell_net += row["net"]
+
+            trades.append(row)
+
+        trades.sort(key=lambda x: x["close_time"] or x["open_time"] or datetime.min.replace(tzinfo=timezone.utc))
+
+        return {
+            "start": self.bot_start_time,
+            "stop": end_time,
+            "count": len(trades),
+            "total_net": total_net,
+            "buy_net": buy_net,
+            "sell_net": sell_net,
+            "trades": trades,
+        }
+
+    def _show_session_trade_report(self, report: dict):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Session Trade Report")
+        dlg.resize(1000, 560)
+
+        layout = QtWidgets.QVBoxLayout(dlg)
+
+        start = report["start"].astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        stop = report["stop"].astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+        lbl = QtWidgets.QLabel(
+            f"Start: {start}\n"
+            f"Stop:  {stop}\n"
+            f"Closed Trades: {report['count']}\n"
+            f"Total PnL: {report['total_net']:.2f}\n"
+            f"Buy PnL:   {report['buy_net']:.2f}\n"
+            f"Sell PnL:  {report['sell_net']:.2f}"
+        )
+        lbl.setStyleSheet("font-weight:600;")
+        layout.addWidget(lbl)
+
+        table = QtWidgets.QTableWidget(0, 9)
+        table.setHorizontalHeaderLabels([
+            "Position ID", "Symbol", "Side", "Volume",
+            "Open Time", "Close Time", "Open Price", "Close Price", "Net PnL"
+        ])
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+
+        for tr in report["trades"]:
+            r = table.rowCount()
+            table.insertRow(r)
+
+            vals = [
+                str(tr["position_id"]),
+                str(tr["symbol"]),
+                str(tr["side"]),
+                f"{tr['volume']:.2f}",
+                tr["open_time"].astimezone().strftime("%Y-%m-%d %H:%M:%S") if tr["open_time"] else "—",
+                tr["close_time"].astimezone().strftime("%Y-%m-%d %H:%M:%S") if tr["close_time"] else "—",
+                f"{tr['open_price']:.5f}" if tr["open_price"] is not None else "—",
+                f"{tr['close_price']:.5f}" if tr["close_price"] is not None else "—",
+                f"{tr['net']:.2f}",
+            ]
+
+            for c, v in enumerate(vals):
+                item = QtWidgets.QTableWidgetItem(v)
+                table.setItem(r, c, item)
+
+        layout.addWidget(table)
+
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        btns.button(QtWidgets.QDialogButtonBox.StandardButton.Close).clicked.connect(dlg.close)
+        layout.addWidget(btns)
+
+        dlg.exec()
+
+    def _format_duration(self, start: datetime | None, stop: datetime | None) -> str:
+        if not start:
+            return "—"
+
+        end = stop or datetime.now(start.tzinfo) if start.tzinfo else datetime.now()
+        secs = max(0, int((end - start).total_seconds()))
+
+        hours = secs // 3600
+        minutes = (secs % 3600) // 60
+        seconds = secs % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

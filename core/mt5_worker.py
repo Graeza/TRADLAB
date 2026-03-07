@@ -121,6 +121,9 @@ class MT5Client:
     def positions_get(self, **kwargs: Any):
         return self._call(mt5.positions_get, **kwargs)
 
+    def history_deals_get(self, start_time, end_time):
+        return self._call(mt5.history_deals_get, start_time, end_time)
+    
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
         return self._call(mt5.copy_rates_from_pos, symbol, timeframe, start_pos, count)
 

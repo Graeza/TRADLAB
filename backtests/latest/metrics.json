@@ -1,16 +1,16 @@
 {
   "metrics": {
     "start_equity": 10000.0,
-    "end_equity": 10882.662128076046,
-    "total_return": 0.0882662128076046,
-    "max_drawdown": -0.06906444809729569,
-    "n_trades": 115,
-    "win_rate": 0.43478260869565216,
-    "avg_trade_pnl": 7.675322852835167,
-    "profit_factor": 1.1404899493518967
+    "end_equity": 10493.657389968124,
+    "total_return": 0.049365738996812514,
+    "max_drawdown": -0.026754066804871454,
+    "n_trades": 321,
+    "win_rate": 0.4984423676012461,
+    "avg_trade_pnl": 1.5378734889973023,
+    "profit_factor": 1.149761011003851
   },
   "extra": {
-    "symbol": "Boom 300 Index",
+    "symbol": "Boom 1000 Index",
     "primary_tf": 5,
     "tfs": [
       5,
