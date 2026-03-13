@@ -185,6 +185,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.bot_start_time: datetime | None = None
         self.bot_stop_time: datetime | None = None
+        self.trade_session_id: int | None = None
 
         # --- Equity curve history (last N points) ---
         self.eq_t = deque(maxlen=600)      # timestamps
@@ -217,9 +218,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_now = QtWidgets.QLabel("Time: —")
         self.lbl_now.setStyleSheet("font-weight:600; color: gray;")
 
-        self.btn_close_pos = QtWidgets.QPushButton("Close Positives")
-        self.btn_close_neg = QtWidgets.QPushButton("Close Negatives")
-        self.btn_close_all = QtWidgets.QPushButton("Close All")
+        self.cmb_close_mode = QtWidgets.QComboBox()
+        self.cmb_close_mode.addItems(["All", "Profits", "Losses", "Buys", "Sells"])
+
+        self.btn_close_selected = QtWidgets.QPushButton("Close")
+
+        close_row = QtWidgets.QHBoxLayout()
+        close_row.addWidget(QtWidgets.QLabel("Close:"))
+        close_row.addWidget(self.cmb_close_mode)
+        close_row.addWidget(self.btn_close_selected)
+        close_row.addStretch(1)   
+
         self.btn_refresh = QtWidgets.QPushButton("Refresh Positions")
 
         top.addWidget(self.btn_start)
@@ -229,10 +238,8 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.btn_mt5_reconnect)
         top.addWidget(self.lbl_now)
         top.addStretch(1)
-        top.addWidget(self.btn_close_pos)
-        top.addWidget(self.btn_close_neg)
-        top.addWidget(self.btn_close_all)
         top.addWidget(self.btn_refresh)
+        top.addLayout(close_row)
         layout.addLayout(top)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -418,6 +425,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ex_retry_delay.setValue(250)
         ex_form.addRow("Retry delay (ms)", self.ex_retry_delay)
 
+        self.ex_block_symbols = QtWidgets.QListWidget()
+        self.ex_block_symbols.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.MultiSelection
+        )
+        self.ex_block_symbols.setMinimumHeight(120)
+
+        for sym in SYMBOL_LIST:
+            item = QtWidgets.QListWidgetItem(str(sym))
+            self.ex_block_symbols.addItem(item)
+
+        ex_form.addRow("Block trading on symbols", self.ex_block_symbols)
+
+        self.ex_enable_trailing = QtWidgets.QCheckBox("Enable trailing stop")
+        self.ex_enable_trailing.setChecked(False)
+        ex_form.addRow(self.ex_enable_trailing)
+
+        self.ex_trailing_trigger_rr = QtWidgets.QDoubleSpinBox()
+        self.ex_trailing_trigger_rr.setDecimals(2)
+        self.ex_trailing_trigger_rr.setRange(0.10, 20.00)
+        self.ex_trailing_trigger_rr.setSingleStep(0.10)
+        self.ex_trailing_trigger_rr.setValue(1.00)
+        ex_form.addRow("Trail trigger (R)", self.ex_trailing_trigger_rr)
+
+        self.ex_trailing_distance_rr = QtWidgets.QDoubleSpinBox()
+        self.ex_trailing_distance_rr.setDecimals(2)
+        self.ex_trailing_distance_rr.setRange(0.05, 20.00)
+        self.ex_trailing_distance_rr.setSingleStep(0.05)
+        self.ex_trailing_distance_rr.setValue(0.50)
+        ex_form.addRow("Trail distance (R)", self.ex_trailing_distance_rr)
+
+        self.ex_trailing_step_rr = QtWidgets.QDoubleSpinBox()
+        self.ex_trailing_step_rr.setDecimals(2)
+        self.ex_trailing_step_rr.setRange(0.01, 10.00)
+        self.ex_trailing_step_rr.setSingleStep(0.01)
+        self.ex_trailing_step_rr.setValue(0.10)
+        ex_form.addRow("Trail step (R)", self.ex_trailing_step_rr)
+
         self.btn_apply_exec_guard = QtWidgets.QPushButton("Apply Execution Guard")
         ex_layout.addWidget(self.btn_apply_exec_guard)
 
@@ -512,6 +556,36 @@ class MainWindow(QtWidgets.QMainWindow):
         perf_layout.addWidget(self.tbl_perf)
 
         tabs.addTab(perf_tab, "Performance")
+
+        # ========== TAB: Trade Journal ==========
+        journal_tab = QtWidgets.QWidget()
+        journal_layout = QtWidgets.QVBoxLayout(journal_tab)
+
+        self.lbl_journal_status = QtWidgets.QLabel("Trade Journal: —")
+        self.lbl_journal_status.setStyleSheet("font-weight:600; color: gray;")
+        journal_layout.addWidget(self.lbl_journal_status)
+
+        self.tbl_sessions = QtWidgets.QTableWidget(0, 8)
+        self.tbl_sessions.setHorizontalHeaderLabels([
+            "Session ID", "Started", "Stopped", "Duration", "Trades", "Wins", "Losses", "Net"
+        ])
+        self.tbl_sessions.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_sessions.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.tbl_sessions.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_sessions.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        journal_layout.addWidget(self.tbl_sessions)
+
+        self.tbl_journal = QtWidgets.QTableWidget(0, 15)
+        self.tbl_journal.setHorizontalHeaderLabels([
+            "Pos ID", "Symbol", "Side", "Volume", "Entry Time", "Exit Time",
+            "Entry", "Exit", "Initial SL", "Initial TP", "Last SL", "Last TP",
+            "1st Trail SL", "Last Trail SL", "Net"
+        ])
+        self.tbl_journal.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_journal.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        journal_layout.addWidget(self.tbl_journal)
+
+        tabs.addTab(journal_tab, "Trade Journal")
 
         # ========== TAB: Strategy Debug ==========
         dbg_tab = QtWidgets.QWidget()
@@ -716,6 +790,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_allow.stateChanged.connect(lambda _: self.log.write(f"[UI] Allow New Trades = {self.chk_allow.isChecked()}"))
 
         self.controller = BotController(self.orch)
+        self.tbl_sessions.itemSelectionChanged.connect(self.on_trade_session_selected)
+        self.refresh_trade_sessions()
 
         # Trigger initial debug view + experiments
         self.render_debug(self.cmb_symbol.currentText())
@@ -724,9 +800,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Wire buttons ---
         self.btn_start.clicked.connect(self.start_bot)
         self.btn_stop.clicked.connect(self.stop_bot)
-        self.btn_close_pos.clicked.connect(lambda: self.close_mode("positive"))
-        self.btn_close_neg.clicked.connect(lambda: self.close_mode("negative"))
-        self.btn_close_all.clicked.connect(lambda: self.close_mode("all"))
+        self.btn_close_selected.clicked.connect(self.close_positions_by_mode)
         self.btn_refresh.clicked.connect(self.refresh_positions)
         self.btn_mt5_reconnect.clicked.connect(self.reconnect_mt5)
 
@@ -805,11 +879,49 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ex_allow_weekends.setChecked(bool(self.executor.allow_weekends))
             self.ex_max_retries.setValue(int(self.executor.max_retries))
             self.ex_retry_delay.setValue(int(self.executor.retry_delay_ms))
+
+            self.ex_enable_trailing.setChecked(bool(getattr(self.executor, "enable_trailing_stop", False)))
+            self.ex_trailing_trigger_rr.setValue(float(getattr(self.executor, "trailing_trigger_rr", 1.0)))
+            self.ex_trailing_distance_rr.setValue(float(getattr(self.executor, "trailing_distance_rr", 0.5)))
+            self.ex_trailing_step_rr.setValue(float(getattr(self.executor, "trailing_step_rr", 0.10)))
+
+            blocked = set(getattr(self.executor, "blocked_symbols", set()) or set())
+            for i in range(self.ex_block_symbols.count()):
+                item = self.ex_block_symbols.item(i)
+                item.setSelected(item.text() in blocked)
+
         except Exception:
             pass
+    @QtCore.Slot()
+    def close_positions_by_mode(self):
+        try:
+            mode = self.cmb_close_mode.currentText().strip().lower()
+
+            if mode == "all":
+                closed = self.executor.close_all_positions()
+
+            elif mode == "profits":
+                closed = self.executor.close_positions_in_profit()
+
+            elif mode == "losses":
+                closed = self.executor.close_positions_in_loss()
+
+            elif mode == "buys":
+                closed = self.executor.close_positions_by_side("BUY")
+
+            elif mode == "sells":
+                closed = self.executor.close_positions_by_side("SELL")
+
+            else:
+                self.log.write(f"[CLOSE] Unknown close mode: {mode}")
+                return
+
+            self.log.write(f"[CLOSE] mode={mode} closed={closed}")
+
+        except Exception as e:
+            self.log.write(f"[CLOSE] Failed: {e}")
 
     # ---------- Strategy building / hot updates ----------
-
     def _build_strategies(self, enabled: Optional[dict] = None):
         enabled = enabled or {
             "RSIEMAStrategy": True,
@@ -1272,12 +1384,20 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- Bot control ----------
     @QtCore.Slot()
     def start_bot(self):
+        self.bot_start_time = datetime.now(timezone.utc)
+        self.bot_stop_time = None
+        try:
+            self.trade_session_id = self.db.create_trade_session(self.bot_start_time)
+            if hasattr(self.orch, "set_trade_session"):
+                self.orch.set_trade_session(self.trade_session_id, self.bot_start_time)
+            self.log.write(f"[JOURNAL] Opened trade session #{self.trade_session_id}")
+        except Exception as e:
+            self.trade_session_id = None
+            self.log.write(f"[JOURNAL] Failed to open DB trade session: {e}")
+
         self.controller.start(sleep_s=LOOP_SLEEP_SECONDS)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-
-        self.bot_start_time = datetime.now(timezone.utc)
-        self.bot_stop_time = None
 
         self.lbl_bot_start_time.setText(self.bot_start_time.strftime("Start Time: %Y-%m-%d %H:%M:%S"))
         self.lbl_bot_stop_time.setText("Stop Time: —")
@@ -1295,6 +1415,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.log.write(f"[BOT] Stopped at {self.bot_stop_time}")
         report = self._build_session_trade_report()
+        if self.trade_session_id:
+            try:
+                self.db.save_session_report(self.trade_session_id, report)
+                self.log.write(f"[JOURNAL] Saved session #{self.trade_session_id} to DB")
+            except Exception as e:
+                self.log.write(f"[JOURNAL] Failed to save session #{self.trade_session_id}: {e}")
+
+        if hasattr(self.orch, "set_trade_session"):
+            self.orch.set_trade_session(None, None)
+
+        self.refresh_trade_sessions(select_session_id=self.trade_session_id)
         self._show_session_trade_report(report)
 
     @QtCore.Slot()
@@ -1346,10 +1477,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.executor.allow_weekends = bool(self.ex_allow_weekends.isChecked())
             self.executor.max_retries = int(self.ex_max_retries.value())
             self.executor.retry_delay_ms = int(self.ex_retry_delay.value())
+            
+            blocked_symbols = set()
+            for item in self.ex_block_symbols.selectedItems():
+                blocked_symbols.add(item.text().strip())
+
+            self.executor.blocked_symbols = blocked_symbols
+            self.executor.enable_trailing_stop = bool(self.ex_enable_trailing.isChecked())
+            self.executor.trailing_trigger_rr = float(self.ex_trailing_trigger_rr.value())
+            self.executor.trailing_distance_rr = float(self.ex_trailing_distance_rr.value())
+            self.executor.trailing_step_rr = float(self.ex_trailing_step_rr.value())
 
             fixed = "ON" if self.executor.force_symbol_fixed_lot else "OFF"
             spread = "ON" if self.executor.enable_spread_filter else "OFF"
             session = "ON" if self.executor.enable_session_filter else "OFF"
+            trailing = "ON" if getattr(self.executor, "enable_trailing_stop", False) else "OFF"
+            blocked_txt = ", ".join(sorted(self.executor.blocked_symbols)) if getattr(self.executor, "blocked_symbols", None) else "—"
 
             self.lbl_exec_guard_status.setText(
                 "spread={spread} (max {max_spread}pt)\n"
@@ -1357,7 +1500,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "weekends={weekends}\n"
                 "retries={retries}@{delay}ms\n"
                 "fixed_lot={fixed}\n"
-                "fixed_sl_tp={fixed_sl_tp} (offset {offset:g})"
+                "fixed_sl_tp={fixed_sl_tp} (offset {offset:g})\n"
+                "trailing={trailing} (trigger {trigger:.2f}R, distance {distance:.2f}R, step {step:.2f}R)"
+                "blocked_symbols={blocked}"
                 .format(
                     spread=spread,
                     max_spread=self.executor.max_spread_points,
@@ -1370,6 +1515,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     fixed=fixed,
                     fixed_sl_tp="ON" if getattr(self.executor, "boom_crash_fixed_sl_tp", False) else "OFF",
                     offset=getattr(self.executor, "boom_crash_sl_tp_offset", 0.0),
+                    trailing=trailing,
+                    trigger=float(getattr(self.executor, "trailing_trigger_rr", 1.0)),
+                    distance=float(getattr(self.executor, "trailing_distance_rr", 0.5)),
+                    step=float(getattr(self.executor, "trailing_step_rr", 0.10)),
+                    blocked=blocked_txt,
                 )
             )
 
@@ -1702,6 +1852,33 @@ class MainWindow(QtWidgets.QMainWindow):
             if not row["closed"]:
                 continue
 
+            if self.trade_session_id and row["position_id"] > 0:
+                try:
+                    open_ev = self.db.get_open_event_for_position(self.trade_session_id, row["position_id"])
+                except Exception:
+                    open_ev = None
+                if open_ev:
+                    row["initial_sl"] = open_ev.get("initial_sl")
+                    row["initial_tp"] = open_ev.get("initial_tp")
+                    row["last_sl"] = open_ev.get("last_sl")
+                    row["last_tp"] = open_ev.get("last_tp")
+                    row["strategy_name"] = open_ev.get("strategy_name") or ""
+                    row["comment"] = open_ev.get("comment") or ""
+                else:
+                    row["initial_sl"] = None
+                    row["initial_tp"] = None
+                    row["last_sl"] = None
+                    row["last_tp"] = None
+                    row["strategy_name"] = ""
+                    row["comment"] = ""
+            else:
+                row["initial_sl"] = None
+                row["initial_tp"] = None
+                row["last_sl"] = None
+                row["last_tp"] = None
+                row["strategy_name"] = ""
+                row["comment"] = ""
+
             row["net"] = row["profit"] + row["commission"] + row["swap"] + row["fee"]
             total_net += row["net"]
 
@@ -1745,10 +1922,11 @@ class MainWindow(QtWidgets.QMainWindow):
         lbl.setStyleSheet("font-weight:600;")
         layout.addWidget(lbl)
 
-        table = QtWidgets.QTableWidget(0, 9)
+        table = QtWidgets.QTableWidget(0, 13)
         table.setHorizontalHeaderLabels([
             "Position ID", "Symbol", "Side", "Volume",
-            "Open Time", "Close Time", "Open Price", "Close Price", "Net PnL"
+            "Open Time", "Close Time", "Open Price", "Close Price",
+            "Initial SL", "Initial TP", "Last SL", "Last TP", "Net PnL"
         ])
         table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
@@ -1766,6 +1944,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 tr["close_time"].astimezone().strftime("%Y-%m-%d %H:%M:%S") if tr["close_time"] else "—",
                 f"{tr['open_price']:.5f}" if tr["open_price"] is not None else "—",
                 f"{tr['close_price']:.5f}" if tr["close_price"] is not None else "—",
+                f"{tr['initial_sl']:.5f}" if tr.get("initial_sl") is not None else "—",
+                f"{tr['initial_tp']:.5f}" if tr.get("initial_tp") is not None else "—",
+                f"{tr['last_sl']:.5f}" if tr.get("last_sl") is not None else "—",
+                f"{tr['last_tp']:.5f}" if tr.get("last_tp") is not None else "—",
                 f"{tr['net']:.2f}",
             ]
 
@@ -1782,6 +1964,89 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(btns)
 
         dlg.exec()
+
+    @QtCore.Slot()
+    def refresh_trade_sessions(self, select_session_id: int | None = None):
+        try:
+            sessions = self.db.list_trade_sessions(limit=200)
+        except Exception as e:
+            self.lbl_journal_status.setText(f"Trade Journal: failed to load sessions ({e})")
+            return
+
+        self.tbl_sessions.setRowCount(0)
+        selected_row = -1
+        for row in sessions:
+            r = self.tbl_sessions.rowCount()
+            self.tbl_sessions.insertRow(r)
+            vals = [
+                str(row.get("id") or ""),
+                str(row.get("started_at") or "—"),
+                str(row.get("stopped_at") or "—"),
+                str(row.get("duration_seconds") or 0),
+                str(row.get("trade_count") or 0),
+                str(row.get("win_count") or 0),
+                str(row.get("loss_count") or 0),
+                f"{float(row.get('total_net') or 0.0):.2f}",
+            ]
+            for c, v in enumerate(vals):
+                self.tbl_sessions.setItem(r, c, QtWidgets.QTableWidgetItem(v))
+            if select_session_id is not None and int(row.get("id") or 0) == int(select_session_id):
+                selected_row = r
+
+        self.lbl_journal_status.setText(f"Trade Journal: {len(sessions)} session(s)")
+        if selected_row >= 0:
+            self.tbl_sessions.selectRow(selected_row)
+            self.refresh_trade_journal_for_session(int(select_session_id))
+        elif sessions:
+            self.tbl_sessions.selectRow(0)
+            self.refresh_trade_journal_for_session(int(sessions[0].get("id") or 0))
+        else:
+            self.tbl_journal.setRowCount(0)
+
+    @QtCore.Slot()
+    def on_trade_session_selected(self):
+        row = self.tbl_sessions.currentRow()
+        if row < 0:
+            return
+        item = self.tbl_sessions.item(row, 0)
+        if item is None:
+            return
+        try:
+            session_id = int(item.text())
+        except Exception:
+            return
+        self.refresh_trade_journal_for_session(session_id)
+
+    def refresh_trade_journal_for_session(self, session_id: int):
+        try:
+            trades = self.db.list_journal_trades(session_id)
+        except Exception as e:
+            self.lbl_journal_status.setText(f"Trade Journal: failed to load trades ({e})")
+            return
+
+        self.tbl_journal.setRowCount(0)
+        for tr in trades:
+            r = self.tbl_journal.rowCount()
+            self.tbl_journal.insertRow(r)
+            vals = [
+                str(tr.get("position_id") or ""),
+                str(tr.get("symbol") or ""),
+                str(tr.get("side") or ""),
+                f"{float(tr.get('volume') or 0.0):.2f}",
+                str(tr.get("entry_time") or "—"),
+                str(tr.get("exit_time") or "—"),
+                f"{float(tr.get('entry_price')):.5f}" if tr.get("entry_price") is not None else "—",
+                f"{float(tr.get('exit_price')):.5f}" if tr.get("exit_price") is not None else "—",
+                f"{float(tr.get('initial_sl')):.5f}" if tr.get("initial_sl") is not None else "—",
+                f"{float(tr.get('initial_tp')):.5f}" if tr.get("initial_tp") is not None else "—",
+                f"{float(tr.get('last_sl')):.5f}" if tr.get("last_sl") is not None else "—",
+                f"{float(tr.get('last_tp')):.5f}" if tr.get("last_tp") is not None else "—",
+                f"{float(tr.get('first_trailing_sl')):.5f}" if tr.get("first_trailing_sl") is not None else "—",
+                f"{float(tr.get('last_trailing_sl')):.5f}" if tr.get("last_trailing_sl") is not None else "—",
+                f"{float(tr.get('net_profit') or 0.0):.2f}",
+            ]
+            for c, v in enumerate(vals):
+                self.tbl_journal.setItem(r, c, QtWidgets.QTableWidgetItem(v))
 
     def _format_duration(self, start: datetime | None, stop: datetime | None) -> str:
         if not start:

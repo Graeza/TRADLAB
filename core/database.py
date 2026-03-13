@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Iterable
 
 import pandas as pd
@@ -20,6 +21,14 @@ def _quote_ident(name: str) -> str:
         raise ValueError(f"Unsafe SQL identifier: {name!r}")
     return f'"{name}"'
 
+def _to_iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value)
 
 class MarketDatabase:
     """SQLite storage for bars/features/labels with upsert semantics.
@@ -38,6 +47,7 @@ class MarketDatabase:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
@@ -104,6 +114,97 @@ class MarketDatabase:
                 future_return REAL,
                 y_class INTEGER,
                 PRIMARY KEY (symbol, timeframe, time, horizon_bars)
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                stopped_at TEXT,
+                duration_seconds INTEGER DEFAULT 0,
+                trade_count INTEGER DEFAULT 0,
+                win_count INTEGER DEFAULT 0,
+                loss_count INTEGER DEFAULT 0,
+                total_net REAL DEFAULT 0.0,
+                buy_net REAL DEFAULT 0.0,
+                sell_net REAL DEFAULT 0.0,
+                notes TEXT DEFAULT ''
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_open_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                event_time TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                volume REAL,
+                entry_price REAL,
+                initial_sl REAL,
+                initial_tp REAL,
+                last_sl REAL,
+                last_tp REAL,
+                position_id INTEGER,
+                order_ticket INTEGER,
+                deal_ticket INTEGER,
+                strategy_name TEXT DEFAULT '',
+                comment TEXT DEFAULT '',
+                raw_result_json TEXT DEFAULT '',
+                FOREIGN KEY(session_id) REFERENCES trade_sessions(id)
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_stop_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                position_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                event_time TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                sl REAL,
+                tp REAL,
+                source TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                FOREIGN KEY(session_id) REFERENCES trade_sessions(id)
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                position_id INTEGER,
+                deal_ticket INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                volume REAL,
+                entry_time TEXT,
+                exit_time TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                initial_sl REAL,
+                initial_tp REAL,
+                last_sl REAL,
+                last_tp REAL,
+                first_trailing_sl REAL,
+                last_trailing_sl REAL,
+                gross_profit REAL DEFAULT 0.0,
+                commission REAL DEFAULT 0.0,
+                swap REAL DEFAULT 0.0,
+                fee REAL DEFAULT 0.0,
+                net_profit REAL DEFAULT 0.0,
+                outcome TEXT,
+                strategy_name TEXT,
+                comment TEXT,
+                UNIQUE(session_id, position_id),
+                FOREIGN KEY(session_id) REFERENCES trade_sessions(id)
             );
             """
         )
@@ -286,3 +387,254 @@ class MarketDatabase:
             LIMIT ?
         """
         return pd.read_sql_query(q, self.conn, params=(horizon_bars, symbol, timeframe, max_rows))
+
+    # -------- Trade Journal --------
+    def create_trade_session(self, started_at: datetime | str) -> int:
+        started = _to_iso(started_at)
+        cur = self.conn.execute(
+            "INSERT INTO trade_sessions(started_at) VALUES(?)",
+            (started,),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def log_trade_open(
+        self,
+        session_id: int,
+        *,
+        event_time: datetime | str | None,
+        symbol: str,
+        side: str,
+        volume: float | None,
+        entry_price: float | None,
+        initial_sl: float | None,
+        initial_tp: float | None,
+        position_id: int | None = None,
+        order_ticket: int | None = None,
+        deal_ticket: int | None = None,
+        strategy_name: str = "",
+        comment: str = "",
+        raw_result_json: str = "",
+    ) -> None:
+        event_ts = _to_iso(event_time or datetime.now(timezone.utc))
+        self.conn.execute(
+            """
+            INSERT INTO trade_open_events(
+                session_id, event_time, symbol, side, volume, entry_price,
+                initial_sl, initial_tp, last_sl, last_tp,
+                position_id, order_ticket, deal_ticket, strategy_name, comment, raw_result_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(session_id), event_ts, str(symbol), str(side), volume, entry_price,
+                initial_sl, initial_tp, initial_sl, initial_tp,
+                position_id, order_ticket, deal_ticket, strategy_name, comment, raw_result_json
+            ),
+        )
+        if position_id and int(position_id) > 0:
+            self.log_trade_stop_event(
+                session_id=session_id,
+                position_id=int(position_id),
+                symbol=symbol,
+                event_time=event_ts,
+                event_type="OPEN",
+                sl=initial_sl,
+                tp=initial_tp,
+                source="executor",
+                note="initial stops",
+            )
+        self.conn.commit()
+
+    def log_trade_stop_event(
+        self,
+        *,
+        session_id: int,
+        position_id: int,
+        symbol: str,
+        event_time: datetime | str | None,
+        event_type: str,
+        sl: float | None,
+        tp: float | None,
+        source: str = "",
+        note: str = "",
+    ) -> None:
+        event_ts = _to_iso(event_time or datetime.now(timezone.utc))
+        self.conn.execute(
+            """
+            INSERT INTO trade_stop_events(session_id, position_id, symbol, event_time, event_type, sl, tp, source, note)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (int(session_id), int(position_id), str(symbol), event_ts, str(event_type), sl, tp, str(source), str(note)),
+        )
+        self.conn.commit()
+
+    def _stop_summary_for_position(self, session_id: int, position_id: int) -> dict[str, Any]:
+        cur = self.conn.execute(
+            """
+            SELECT event_type, sl, tp, event_time
+            FROM trade_stop_events
+            WHERE session_id=? AND position_id=?
+            ORDER BY event_time ASC, id ASC
+            """,
+            (int(session_id), int(position_id)),
+        )
+        rows = cur.fetchall()
+        first_trail = None
+        last_trail = None
+        last_sl = None
+        last_tp = None
+        for row in rows:
+            sl = row["sl"]
+            tp = row["tp"]
+            if sl is not None:
+                last_sl = sl
+            if tp is not None:
+                last_tp = tp
+            if str(row["event_type"]).upper() == "TRAIL" and sl is not None:
+                if first_trail is None:
+                    first_trail = sl
+                last_trail = sl
+        return {
+            "first_trailing_sl": first_trail,
+            "last_trailing_sl": last_trail,
+            "last_sl": last_sl,
+            "last_tp": last_tp,
+        }
+
+    def save_session_report(self, session_id: int, report: dict[str, Any]) -> None:
+        trades = list(report.get("trades") or [])
+        for tr in trades:
+            position_id = int(tr.get("position_id") or 0)
+            stop_summary = self._stop_summary_for_position(session_id, position_id) if position_id > 0 else {}
+            initial_sl = tr.get("initial_sl")
+            initial_tp = tr.get("initial_tp")
+            last_sl = stop_summary.get("last_sl", tr.get("last_sl"))
+            last_tp = stop_summary.get("last_tp", tr.get("last_tp"))
+            first_trailing_sl = stop_summary.get("first_trailing_sl")
+            last_trailing_sl = stop_summary.get("last_trailing_sl")
+            net = float(tr.get("net", 0.0) or 0.0)
+            outcome = "WIN" if net > 0 else "LOSS" if net < 0 else "FLAT"
+            self.conn.execute(
+                """
+                INSERT INTO trade_journal(
+                    session_id, position_id, deal_ticket, symbol, side, volume,
+                    entry_time, exit_time, entry_price, exit_price,
+                    initial_sl, initial_tp, last_sl, last_tp,
+                    first_trailing_sl, last_trailing_sl,
+                    gross_profit, commission, swap, fee, net_profit, outcome,
+                    strategy_name, comment
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(session_id, position_id) DO UPDATE SET
+                    deal_ticket=excluded.deal_ticket,
+                    symbol=excluded.symbol,
+                    side=excluded.side,
+                    volume=excluded.volume,
+                    entry_time=excluded.entry_time,
+                    exit_time=excluded.exit_time,
+                    entry_price=excluded.entry_price,
+                    exit_price=excluded.exit_price,
+                    initial_sl=excluded.initial_sl,
+                    initial_tp=excluded.initial_tp,
+                    last_sl=excluded.last_sl,
+                    last_tp=excluded.last_tp,
+                    first_trailing_sl=excluded.first_trailing_sl,
+                    last_trailing_sl=excluded.last_trailing_sl,
+                    gross_profit=excluded.gross_profit,
+                    commission=excluded.commission,
+                    swap=excluded.swap,
+                    fee=excluded.fee,
+                    net_profit=excluded.net_profit,
+                    outcome=excluded.outcome,
+                    strategy_name=excluded.strategy_name,
+                    comment=excluded.comment
+                """,
+                (
+                    int(session_id),
+                    position_id if position_id > 0 else None,
+                    tr.get("deal_ticket"),
+                    str(tr.get("symbol") or ""),
+                    str(tr.get("side") or ""),
+                    tr.get("volume"),
+                    _to_iso(tr.get("open_time")),
+                    _to_iso(tr.get("close_time")),
+                    tr.get("open_price"),
+                    tr.get("close_price"),
+                    initial_sl,
+                    initial_tp,
+                    last_sl,
+                    last_tp,
+                    first_trailing_sl,
+                    last_trailing_sl,
+                    tr.get("profit"),
+                    tr.get("commission"),
+                    tr.get("swap"),
+                    tr.get("fee"),
+                    net,
+                    outcome,
+                    tr.get("strategy_name"),
+                    tr.get("comment"),
+                ),
+            )
+
+        start = report.get("start")
+        stop = report.get("stop")
+        duration_seconds = 0
+        if isinstance(start, datetime) and isinstance(stop, datetime):
+            duration_seconds = max(0, int((stop - start).total_seconds()))
+        total_net = float(report.get("total_net", 0.0) or 0.0)
+        buy_net = float(report.get("buy_net", 0.0) or 0.0)
+        sell_net = float(report.get("sell_net", 0.0) or 0.0)
+        win_count = sum(1 for tr in trades if float(tr.get("net", 0.0) or 0.0) > 0)
+        loss_count = sum(1 for tr in trades if float(tr.get("net", 0.0) or 0.0) < 0)
+        self.conn.execute(
+            """
+            UPDATE trade_sessions
+            SET stopped_at=?, duration_seconds=?, trade_count=?, win_count=?, loss_count=?,
+                total_net=?, buy_net=?, sell_net=?
+            WHERE id=?
+            """,
+            (
+                _to_iso(stop), duration_seconds, len(trades), win_count, loss_count,
+                total_net, buy_net, sell_net, int(session_id)
+            ),
+        )
+        self.conn.commit()
+
+    def list_trade_sessions(self, limit: int = 200) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT id, started_at, stopped_at, duration_seconds, trade_count, win_count, loss_count,
+                   total_net, buy_net, sell_net, notes
+            FROM trade_sessions
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def list_journal_trades(self, session_id: int) -> list[dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT *
+            FROM trade_journal
+            WHERE session_id=?
+            ORDER BY COALESCE(exit_time, entry_time) DESC, id DESC
+            """,
+            (int(session_id),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_open_event_for_position(self, session_id: int, position_id: int) -> dict[str, Any] | None:
+        cur = self.conn.execute(
+            """
+            SELECT *
+            FROM trade_open_events
+            WHERE session_id=? AND position_id=?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(session_id), int(position_id)),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None

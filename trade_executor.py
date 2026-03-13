@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import math
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime , timezone
 from typing import Optional, Any
 
 import MetaTrader5 as mt5  # for constants only
@@ -11,7 +11,7 @@ from core.mt5_worker import MT5Client
 
 
 class TradeExecutor:
-    """Executes trades via MT5 with optional execution guardrails.
+    """Executes trades via MT5 with optional execution guardrails and trailing stops.
 
     IMPORTANT: All MT5 terminal calls are serialized via MT5Client.
     """
@@ -31,6 +31,13 @@ class TradeExecutor:
         comment: str = "ModularBot",
         min_allowed_lot: float = 0.0,   # 0.0 = disabled
         force_symbol_fixed_lot: bool = False,
+        boom_crash_fixed_sl_tp: bool = False,
+        boom_crash_sl_tp_offset: float = 10.0,
+        enable_trailing_stop: bool = False,
+        trailing_trigger_rr: float = 1.0,
+        trailing_distance_rr: float = 0.5,
+        trailing_step_rr: float = 0.10,
+        blocked_symbols: Optional[set[str]] = None
     ):
         self.mt5 = mt5_client
 
@@ -49,6 +56,14 @@ class TradeExecutor:
         self.comment = str(comment)
         self.min_allowed_lot = float(min_allowed_lot)
         self.force_symbol_fixed_lot = bool(force_symbol_fixed_lot)
+        self._trailing_anchor_sl: dict[int, float] = {}
+        self.boom_crash_fixed_sl_tp = bool(boom_crash_fixed_sl_tp)
+        self.boom_crash_sl_tp_offset = float(boom_crash_sl_tp_offset)
+        self.enable_trailing_stop = bool(enable_trailing_stop)
+        self.trailing_trigger_rr = float(trailing_trigger_rr)
+        self.trailing_distance_rr = float(trailing_distance_rr)
+        self.trailing_step_rr = max(0.0, float(trailing_step_rr))
+        self.blocked_symbols: set[str] = blocked_symbols if blocked_symbols is not None else set()
 
     def _fixed_lot_for_symbol(self, symbol: str) -> Optional[float]:
         s = symbol.lower()
@@ -152,7 +167,9 @@ class TradeExecutor:
             return point * 10.0
         return lvl_pts * point
 
-    def _round_price(self, info, price: float) -> float:
+    def _round_price(self, info, price: float | None) -> float | None:
+        if price is None:
+            return None
         digits = getattr(info, "digits", None)
         if digits is None:
             return float(price)
@@ -188,7 +205,379 @@ class TradeExecutor:
         tp = self._round_price(info, tp) if tp not in (None, 0.0) else tp
         return sl, tp
     
-    def execute(self, params: dict[str, Any]):
+    def _apply_fixed_sl_tp_offset(self, symbol: str, action: str, price: float, sl, tp, info):
+        if not self.boom_crash_fixed_sl_tp:
+            return sl, tp
+        sym_l = symbol.lower()
+        if "boom" not in sym_l and "crash" not in sym_l:
+            return sl, tp
+        offset = float(self.boom_crash_sl_tp_offset or 0.0)
+        if offset <= 0:
+            return sl, tp
+        if action.upper() == "BUY":
+            sl = price - offset
+            tp = price + offset
+        else:
+            sl = price + offset
+            tp = price - offset
+        return self._round_price(info, sl), self._round_price(info, tp)
+
+    def _position_matches(self, pos) -> bool:
+        try:
+            pos_magic = int(getattr(pos, "magic", 0) or 0)
+        except Exception:
+            pos_magic = 0
+        if pos_magic and pos_magic != self.magic:
+            return False
+        pos_comment = str(getattr(pos, "comment", "") or "")
+        if pos_magic == 0 and self.comment and pos_comment and pos_comment != self.comment:
+            return False
+        return True
+
+    def _position_side(self, pos) -> str:
+        ptype = int(getattr(pos, "type", -1))
+        if ptype == int(mt5.POSITION_TYPE_BUY):
+            return "BUY"
+        if ptype == int(mt5.POSITION_TYPE_SELL):
+            return "SELL"
+        return "UNKNOWN"
+
+    def _position_live_price(self, symbol: str, side: str) -> float | None:
+        tick = self.mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return None
+        if side == "BUY":
+            return float(getattr(tick, "bid", 0.0) or 0.0)
+        if side == "SELL":
+            return float(getattr(tick, "ask", 0.0) or 0.0)
+        return None
+
+    def _modify_position_sl_tp(self, *, position_id: int, symbol: str, sl: float | None, tp: float | None) -> Any:
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": symbol,
+            "position": int(position_id),
+            "sl": 0.0 if sl in (None, 0, 0.0) else float(sl),
+            "tp": 0.0 if tp in (None, 0, 0.0) else float(tp),
+        }
+        return mt5.order_send(request)
+
+    def _rr_triggered(self, current_profit_dist: float, initial_risk: float) -> bool:
+        trigger = max(0.0, float(self.trailing_trigger_rr)) * initial_risk
+        return current_profit_dist >= (trigger - 1e-12)
+
+    def _rr_step_passed(self, candidate_sl: float, current_sl: float | None, initial_risk: float, side: str) -> bool:
+        if current_sl in (None, 0, 0.0):
+            return True
+        step = max(0.0, float(self.trailing_step_rr)) * initial_risk
+        if step <= 0:
+            return True
+        if side == "BUY":
+            return (candidate_sl - float(current_sl)) >= (step - 1e-12)
+        return (float(current_sl) - candidate_sl) >= (step - 1e-12)
+    
+    def _get_anchor_sl(self, pos) -> float | None:
+        position_id = int(getattr(pos, "ticket", 0) or 0)
+        if position_id <= 0:
+            return None
+
+        cached = self._trailing_anchor_sl.get(position_id)
+        if cached not in (None, 0, 0.0):
+            return float(cached)
+
+        live_sl = getattr(pos, "sl", None)
+        if live_sl in (None, 0, 0.0):
+            return None
+
+        live_sl = float(live_sl)
+        self._trailing_anchor_sl[position_id] = live_sl
+        return live_sl
+    
+    def _compute_trailing_sl(self, pos) -> tuple[float | None, dict[str, Any] | None]:
+        side = self._position_side(pos)
+        if side not in ("BUY", "SELL"):
+            return None, {"reason": "unsupported_position_type"}
+
+        position_id = int(getattr(pos, "ticket", 0) or 0)
+        symbol = str(getattr(pos, "symbol", "") or "")
+        info = self.mt5.symbol_info(symbol)
+        if info is None:
+            return None, {"reason": "no_symbol_info"}
+
+        entry_price = float(getattr(pos, "price_open", 0.0) or 0.0)
+        current_sl = getattr(pos, "sl", None)
+        current_tp = getattr(pos, "tp", None)
+
+        if entry_price <= 0:
+            return None, {"reason": "no_entry_price"}
+
+        if current_sl in (None, 0, 0.0):
+            return None, {"reason": "no_current_sl"}
+
+        current_sl = float(current_sl)
+
+        anchor_sl = self._get_anchor_sl(pos)
+        if anchor_sl in (None, 0, 0.0):
+            return None, {"reason": "no_anchor_sl"}
+
+        anchor_sl = float(anchor_sl)
+        initial_risk = abs(entry_price - anchor_sl)
+        if initial_risk <= 0:
+            return None, {
+                "reason": "zero_initial_risk",
+                "entry_price": entry_price,
+                "anchor_sl": anchor_sl,
+            }
+
+        live_price = self._position_live_price(symbol, side)
+        if live_price is None or live_price <= 0:
+            return None, {"reason": "no_live_price"}
+
+        profit_dist = (live_price - entry_price) if side == "BUY" else (entry_price - live_price)
+        if profit_dist <= 0:
+            return None, {
+                "reason": "not_in_profit",
+                "profit_dist": profit_dist,
+                "initial_risk": initial_risk,
+            }
+
+        if not self._rr_triggered(profit_dist, initial_risk):
+            return None, {
+                "reason": "trigger_not_reached",
+                "profit_dist": profit_dist,
+                "initial_risk": initial_risk,
+            }
+
+        trail_gap = max(0.0, float(self.trailing_distance_rr)) * initial_risk
+
+        if side == "BUY":
+            candidate_sl = live_price - trail_gap
+            candidate_sl = min(candidate_sl, live_price - self._stops_min_distance(info))
+            candidate_sl = self._round_price(info, candidate_sl)
+
+            if candidate_sl is None or candidate_sl <= entry_price:
+                candidate_sl = self._round_price(info, entry_price)
+
+            if candidate_sl is None or candidate_sl <= current_sl + 1e-12:
+                return None, {
+                    "reason": "not_better_than_current",
+                    "candidate_sl": candidate_sl,
+                    "current_sl": current_sl,
+                }
+
+        else:
+            candidate_sl = live_price + trail_gap
+            candidate_sl = max(candidate_sl, live_price + self._stops_min_distance(info))
+            candidate_sl = self._round_price(info, candidate_sl)
+
+            if candidate_sl is None or candidate_sl >= entry_price:
+                candidate_sl = self._round_price(info, entry_price)
+
+            if candidate_sl is None or candidate_sl >= current_sl - 1e-12:
+                return None, {
+                    "reason": "not_better_than_current",
+                    "candidate_sl": candidate_sl,
+                    "current_sl": current_sl,
+                }
+
+        if not self._rr_step_passed(candidate_sl, current_sl, initial_risk, side):
+            return None, {
+                "reason": "step_not_reached",
+                "candidate_sl": candidate_sl,
+                "current_sl": current_sl,
+                "initial_risk": initial_risk,
+            }
+
+        adj_sl, adj_tp = self._adjust_sl_tp_to_stops(info, side, live_price, candidate_sl, current_tp)
+        candidate_sl = None if adj_sl in (None, 0, 0.0) else float(adj_sl)
+        if candidate_sl is None:
+            return None, {"reason": "candidate_invalid_after_adjust"}
+
+        meta = {
+            "position_id": position_id,
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry_price,
+            "live_price": live_price,
+            "anchor_sl": anchor_sl,
+            "initial_risk": initial_risk,
+            "profit_dist": profit_dist,
+            "current_sl": current_sl,
+            "current_tp": None if current_tp in (None, 0, 0.0) else float(current_tp),
+            "candidate_sl": candidate_sl,
+            "candidate_tp": None if adj_tp in (None, 0, 0.0) else float(adj_tp),
+        }
+        return candidate_sl, meta
+    
+    def _cleanup_trailing_anchors(self, open_positions) -> None:
+        open_ids = {
+            int(getattr(p, "ticket", 0) or 0)
+            for p in open_positions
+            if int(getattr(p, "ticket", 0) or 0) > 0
+        }
+        stale = [pid for pid in self._trailing_anchor_sl.keys() if pid not in open_ids]
+        for pid in stale:
+            self._trailing_anchor_sl.pop(pid, None)
+
+    def manage_trailing_stops(self) -> list[dict[str, Any]]:
+        if not self.enable_trailing_stop:
+            return []
+
+        try:
+            positions = self.mt5.positions_get() or []
+            self._cleanup_trailing_anchors(positions)
+        except Exception as e:
+            return [{"ok": False, "reason": "positions_get_failed", "error": str(e)}]
+
+        events: list[dict[str, Any]] = []
+        for pos in positions:
+            try:
+                if not self._position_matches(pos):
+                    continue
+                position_id = int(getattr(pos, "ticket", 0) or 0)
+                symbol = str(getattr(pos, "symbol", "") or "")
+                if position_id <= 0 or not symbol:
+                    continue
+
+                new_sl, meta = self._compute_trailing_sl(pos)
+                if new_sl is None:
+                    print(
+                        f"[TRAIL SKIP] symbol={symbol} pos={position_id} "
+                        f"reason={meta.get('reason') if isinstance(meta, dict) else 'unknown'} "
+                        f"meta={meta}"
+                    )
+                    continue
+
+                tp = meta.get("candidate_tp") if meta else None
+                print(
+                    f"[TRAIL DEBUG] symbol={symbol} pos={position_id} "
+                    f"side={meta.get('side')} entry={meta.get('entry_price')} "
+                    f"live={meta.get('live_price')} old_sl={meta.get('current_sl')} "
+                    f"new_sl={new_sl} risk={meta.get('initial_risk')} "
+                    f"profit_dist={meta.get('profit_dist')}"
+                )
+                result = self._modify_position_sl_tp(position_id=position_id, symbol=symbol, sl=new_sl, tp=tp)
+                print(
+                    f"[TRAIL DEBUG] modify symbol={symbol} pos={position_id} "
+                    f"retcode={retcode} comment={getattr(result, 'comment', '')}"
+                )
+
+                retcode = int(getattr(result, "retcode", -1) or -1) if result is not None else -1
+                ok = result is not None and retcode in {int(mt5.TRADE_RETCODE_DONE), int(mt5.TRADE_RETCODE_DONE_PARTIAL), int(mt5.TRADE_RETCODE_PLACED)}
+
+                event = {
+                    "ok": ok,
+                    "event_type": "TRAIL",
+                    "position_id": position_id,
+                    "symbol": symbol,
+                    "side": meta.get("side") if meta else self._position_side(pos),
+                    "old_sl": meta.get("current_sl") if meta else None,
+                    "new_sl": new_sl,
+                    "tp": tp,
+                    "live_price": meta.get("live_price") if meta else None,
+                    "entry_price": meta.get("entry_price") if meta else None,
+                    "initial_risk": meta.get("initial_risk") if meta else None,
+                    "profit_dist": meta.get("profit_dist") if meta else None,
+                    "retcode": retcode,
+                    "comment": getattr(result, "comment", "") if result is not None else "",
+                    "event_time": datetime.now(timezone.utc),
+                }
+                events.append(event)
+            except Exception as e:
+                events.append({
+                    "ok": False,
+                    "event_type": "TRAIL",
+                    "reason": "exception",
+                    "error": str(e),
+                    "position_id": int(getattr(pos, "ticket", 0) or 0),
+                    "symbol": str(getattr(pos, "symbol", "") or ""),
+                    "event_time": datetime.now(timezone.utc),
+                })
+        return events
+
+    #-------Close Helper Functions-------
+    def _positions(self):
+        pos = self.mt5.positions_get()
+        return list(pos) if pos else []
+
+    def _close_position_obj(self, p) -> bool:
+        symbol = getattr(p, "symbol", "")
+        volume = float(getattr(p, "volume", 0.0) or 0.0)
+        ticket = int(getattr(p, "ticket", 0) or 0)
+        ptype = int(getattr(p, "type", -1))
+
+        tick = self.mt5.symbol_info_tick(symbol)
+        if tick is None:
+            print(f"[EXECUTOR] close skip: no tick for {symbol}")
+            return False
+
+        if ptype == mt5.POSITION_TYPE_BUY:
+            order_type = mt5.ORDER_TYPE_SELL
+            price = float(tick.bid)
+        elif ptype == mt5.POSITION_TYPE_SELL:
+            order_type = mt5.ORDER_TYPE_BUY
+            price = float(tick.ask)
+        else:
+            print(f"[EXECUTOR] close skip: unknown position type ticket={ticket}")
+            return False
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 50,
+            "magic": self.magic,
+            "comment": f"{self.comment}-close",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+
+        result = mt5.order_send(request)
+        ok = result is not None and int(getattr(result, "retcode", 0)) == mt5.TRADE_RETCODE_DONE
+        if not ok:
+            print(f"[EXECUTOR] close failed ticket={ticket} result={result}")
+        return ok
+
+    def close_all_positions(self) -> int:
+        count = 0
+        for p in self._positions():
+            if self._close_position_obj(p):
+                count += 1
+        return count
+
+    def close_positions_by_side(self, side: str) -> int:
+        side = str(side).upper()
+        count = 0
+        for p in self._positions():
+            ptype = int(getattr(p, "type", -1))
+            if side == "BUY" and ptype != mt5.POSITION_TYPE_BUY:
+                continue
+            if side == "SELL" and ptype != mt5.POSITION_TYPE_SELL:
+                continue
+            if self._close_position_obj(p):
+                count += 1
+        return count
+
+    def close_positions_in_profit(self) -> int:
+        count = 0
+        for p in self._positions():
+            profit = float(getattr(p, "profit", 0.0) or 0.0)
+            if profit > 0 and self._close_position_obj(p):
+                count += 1
+        return count
+
+    def close_positions_in_loss(self) -> int:
+        count = 0
+        for p in self._positions():
+            profit = float(getattr(p, "profit", 0.0) or 0.0)
+            if profit < 0 and self._close_position_obj(p):
+                count += 1
+        return count
+
+    def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         symbol = str(params["symbol"])
         action = str(params["action"]).upper()
         requested_lot = float(params["lot_size"])
@@ -204,22 +593,27 @@ class TradeExecutor:
         tp = None if tp in (None, 0, 0.0) else float(tp)
 
         deviation = int(params.get("deviation") or 20)
+        strategy_name = str(params.get("strategy_name") or "")
+        strategy_comment = str(params.get("comment") or self.comment)
 
         # Extra spread gate (price-based) for synthetics (kept from your version)
         spread_price = float(tick.ask) - float(tick.bid)
-        if "Boom" in symbol or "Crash" in symbol:
+        if "boom" in symbol.lower() or "crash" in symbol.lower():
             if spread_price > 3.0:   # adjust after observing
-                return {
-                    "ok": False,
-                    "reason": "spread_price_too_high",
-                    "symbol": symbol,
-                    "spread_price": spread_price,
-                }
+                return {"ok": False, "reason": "spread_price_too_high", "symbol": symbol,  "spread_price": spread_price}
 
         if not self._within_session():
             print(f"[EXECUTOR] BLOCK session_filter symbol={symbol}")
             return {"ok": False, "reason": "session_filter_blocked", "symbol": symbol}
-
+        
+        if symbol in getattr(self, "blocked_symbols", set()):
+            print(f"[EXECUTOR] BLOCK symbol_blocked symbol={symbol}")
+            return {
+                "ok": False,
+                "reason": "symbol_blocked",
+                "symbol": symbol,
+            }
+        
         if self.enable_spread_filter:
             sym_l = symbol.lower()
 
@@ -234,12 +628,7 @@ class TradeExecutor:
 
                 if spread_price > max_spread_price:
                     print(f"[EXECUTOR] BLOCK spread_price_too_high symbol={symbol} spread_price={spread_price}")
-                    return {
-                        "ok": False,
-                        "reason": "spread_price_too_high",
-                        "symbol": symbol,
-                        "spread_price": spread_price,
-                    }
+                    return {"ok": False,"reason": "spread_price_too_high", "symbol": symbol, "spread_price": spread_price}
 
             else:
                 sp = self._spread_points(symbol)
@@ -248,13 +637,7 @@ class TradeExecutor:
 
                 if sp > int(self.max_spread_points):
                     print(f"[EXECUTOR] BLOCK spread_too_high symbol={symbol} sp={sp} max={self.max_spread_points}")
-                    return {
-                        "ok": False,
-                        "reason": "spread_too_high",
-                        "symbol": symbol,
-                        "spread_points": sp,
-                        "max_spread_points": int(self.max_spread_points),
-                    }
+                    return {"ok": False, "reason": "spread_too_high", "symbol": symbol, "spread_points": sp, "max_spread_points": int(self.max_spread_points)}
 
         # -------------------------
         # LOT LOGIC (fixed)
@@ -288,41 +671,65 @@ class TradeExecutor:
         # -------------------------
         # STOP / LIMIT ENFORCEMENT
         # -------------------------
+        sl, tp = self._apply_fixed_sl_tp_offset(symbol, action, price, sl, tp, info)
         sl, tp = self._adjust_sl_tp_to_stops(info, action, price, sl, tp)   
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
-            "volume": float(lot),
-            "type": int(order_type),
-            "price": float(price),
-            "sl": sl,
-            "tp": tp,
-            "deviation": int(deviation),
-            "magic": int(self.magic),
-            "comment": str(self.comment),
+            "volume": lot,
+            "type": order_type,
+            "price": price,
+            "sl": 0.0 if sl in (None, 0, 0.0) else float(sl),
+            "tp": 0.0 if tp in (None, 0, 0.0) else float(tp),
+            "deviation": deviation,
+            "magic": self.magic,
+            "comment": strategy_comment or self.comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": getattr(mt5, "ORDER_FILLING_FOK", 1),
         }
 
-        attempts = 0
-        while True:
-            attempts += 1
-            print(f"[EXECUTOR] SENDING request={request}")
+        attempts = max(1, self.max_retries + 1)
+        last_result = None
+        for i in range(attempts):
             result = mt5.order_send(request)
+            last_result = result
+            retcode = int(getattr(result, "retcode", -1) or -1) if result is not None else -1
+            if result is not None and retcode in {
+                int(mt5.TRADE_RETCODE_DONE),
+                int(mt5.TRADE_RETCODE_PLACED),
+                int(mt5.TRADE_RETCODE_DONE_PARTIAL),
+            }:
+                return {
+                    "ok": True,
+                    "symbol": symbol,
+                    "action": action,
+                    "volume": lot,
+                    "price": price,
+                    "sl": sl,
+                    "tp": tp,
+                    "event_time": datetime.now(timezone.utc),
+                    "retcode": retcode,
+                    "order_ticket": int(getattr(result, "order", 0) or 0) or None,
+                    "deal_ticket": int(getattr(result, "deal", 0) or 0) or None,
+                    "position_id": int(getattr(result, "order", 0) or 0) or None,
+                    "strategy_name": strategy_name,
+                    "comment": strategy_comment,
+                    "raw": result,
+                }
+            if i + 1 < attempts:
+                time.sleep(max(0, self.retry_delay_ms) / 1000.0)
 
-            retcode = getattr(result, "retcode", None)
-            comment = getattr(result, "comment", None)
-            request_id = getattr(result, "request_id", None)
-
-            print(f"[EXECUTOR] RESULT retcode={retcode} comment={comment} request_id={request_id}")
-            print(f"[EXECUTOR] last_error={self.mt5.last_error()}")
-
-            if retcode is None:
-                return result
-
-            if retcode == mt5.TRADE_RETCODE_DONE:
-                return result
-
-            if attempts > self.max_retries:
-                return result
-
-            time.sleep(max(0.0, self.retry_delay_ms / 1000.0))
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "action": action,
+            "volume": lot,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "retcode": int(getattr(last_result, "retcode", -1) or -1) if last_result is not None else -1,
+            "comment": getattr(last_result, "comment", "") if last_result is not None else "",
+            "reason": "order_send_failed",
+            "raw": last_result,
+        }
