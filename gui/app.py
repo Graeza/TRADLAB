@@ -892,6 +892,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
+
     @QtCore.Slot()
     def close_positions_by_mode(self):
         try:
@@ -989,7 +990,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     # ---------- Experiments ----------
-
     @QtCore.Slot()
     def refresh_experiments(self):
         path = self._experiments_path()
@@ -1151,6 +1151,12 @@ class MainWindow(QtWidgets.QMainWindow):
         tfs = [t.strip() for t in self.bt_tfs.text().split(",") if t.strip()]
         primary_tf = str(self.bt_primary_tf.currentData())
 
+        blocked_symbols = []
+        try:
+            blocked_symbols = [item.text().strip() for item in self.ex_block_symbols.selectedItems() if item.text().strip()]
+        except Exception:
+            blocked_symbols = []
+
         cmd = [sys.executable, script, "--symbol", symbol, "--primary-tf", primary_tf]
         if tfs:
             cmd += ["--tfs"] + tfs
@@ -1158,6 +1164,51 @@ class MainWindow(QtWidgets.QMainWindow):
             cmd += ["--start", self.bt_start.text().strip()]
         if self.bt_end.text().strip():
             cmd += ["--end", self.bt_end.text().strip()]
+
+        # Strategy settings
+        cmd += [
+            "--use-rsi", str(self.chk_use_rsi.isChecked()).lower(),
+            "--use-breakout", str(self.chk_use_breakout.isChecked()).lower(),
+            "--use-ml", str(self.chk_use_ml.isChecked()).lower(),
+            "--use-boom", str(self.chk_use_boom.isChecked()).lower(),
+            "--weight-rsi", str(float(self.w_rsi.value())),
+            "--weight-breakout", str(float(self.w_breakout.value())),
+            "--weight-ml", str(float(self.w_ml.value())),
+            "--weight-boom", str(float(self.w_boom.value())),
+            "--ensemble-min-conf", str(float(self.spin_min_conf.value())),
+        ]
+
+        # Risk settings
+        cmd += [
+            "--risk-max-pct", str(float(self.risk_max_risk_pct.value())),
+            "--risk-min-conf", str(float(self.risk_min_conf.value())),
+            "--risk-sl-atr", str(float(self.risk_sl_atr.value())),
+            "--risk-tp-rr", str(float(self.risk_tp_rr.value())),
+            "--risk-fallback-sl", str(float(self.risk_fallback_sl.value())),
+            "--risk-max-spread", str(int(self.risk_max_spread.value())),
+            "--risk-base-dev", str(int(self.risk_base_dev.value())),
+        ]
+
+        # Execution guard settings
+        cmd += [
+            "--allow-new-trades", str(self.chk_allow.isChecked()).lower(),
+            "--blocked-symbols", ",".join(blocked_symbols),
+            "--enable-session-filter", str(self.ex_enable_session.isChecked()).lower(),
+            "--session-start-hour", str(int(self.ex_session_start.value())),
+            "--session-end-hour", str(int(self.ex_session_end.value())),
+            "--allow-weekends", str(self.ex_allow_weekends.isChecked()).lower(),
+            "--enable-spread-filter", str(self.ex_enable_spread.isChecked()).lower(),
+            "--exec-max-spread", str(int(self.ex_max_spread.value())),
+            "--force-fixed-lot", str(self.ex_force_fixed_lot.isChecked()).lower(),
+            "--fixed-sl-tp", str(self.ex_fixed_sl_tp.isChecked()).lower(),
+            "--sl-tp-offset", str(float(self.ex_sl_tp_offset.value())),
+            "--enable-trailing-stop", str(self.ex_enable_trailing.isChecked()).lower(),
+            "--trailing-trigger-rr", str(float(self.ex_trailing_trigger_rr.value())),
+            "--trailing-distance-rr", str(float(self.ex_trailing_distance_rr.value())),
+            "--trailing-step-rr", str(float(self.ex_trailing_step_rr.value())),
+            "--max-retries", str(int(self.ex_max_retries.value())),
+            "--retry-delay-ms", str(int(self.ex_retry_delay.value())),
+        ]
 
         self.lbl_bt_status.setText("Backtest: running…")
         self.lbl_bt_status.setStyleSheet("font-weight:600; color: gray;")
