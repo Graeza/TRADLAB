@@ -437,6 +437,51 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ex_form.addRow("Block trading on symbols", self.ex_block_symbols)
 
+        self.ex_single_pos_per_symbol = QtWidgets.QCheckBox("Only one open position per symbol")
+        self.ex_single_pos_per_symbol.setChecked(True)
+        ex_form.addRow(self.ex_single_pos_per_symbol)
+
+        self.ex_max_pos_per_symbol = QtWidgets.QSpinBox()
+        self.ex_max_pos_per_symbol.setRange(1, 100)
+        self.ex_max_pos_per_symbol.setValue(1)
+        ex_form.addRow("Max positions per symbol", self.ex_max_pos_per_symbol)
+
+        self.ex_max_total_positions = QtWidgets.QSpinBox()
+        self.ex_max_total_positions.setRange(0, 500)
+        self.ex_max_total_positions.setSpecialValueText("Disabled")
+        self.ex_max_total_positions.setValue(0)
+        ex_form.addRow("Max total open positions", self.ex_max_total_positions)
+
+        self.ex_one_entry_per_bar = QtWidgets.QCheckBox("Only one entry per closed bar")
+        self.ex_one_entry_per_bar.setChecked(True)
+        ex_form.addRow(self.ex_one_entry_per_bar)
+
+        self.ex_enable_cooldown = QtWidgets.QCheckBox("Enable symbol cooldown")
+        self.ex_enable_cooldown.setChecked(False)
+        ex_form.addRow(self.ex_enable_cooldown)
+
+        self.ex_cooldown_minutes = QtWidgets.QSpinBox()
+        self.ex_cooldown_minutes.setRange(0, 10_080)
+        self.ex_cooldown_minutes.setSpecialValueText("Disabled")
+        self.ex_cooldown_minutes.setValue(0)
+        ex_form.addRow("Cooldown (minutes)", self.ex_cooldown_minutes)
+
+        self.ex_enable_daily_limits = QtWidgets.QCheckBox("Enable daily trade limits")
+        self.ex_enable_daily_limits.setChecked(False)
+        ex_form.addRow(self.ex_enable_daily_limits)
+
+        self.ex_daily_trades_per_symbol = QtWidgets.QSpinBox()
+        self.ex_daily_trades_per_symbol.setRange(0, 10_000)
+        self.ex_daily_trades_per_symbol.setSpecialValueText("Disabled")
+        self.ex_daily_trades_per_symbol.setValue(0)
+        ex_form.addRow("Max daily trades / symbol", self.ex_daily_trades_per_symbol)
+
+        self.ex_daily_trades_total = QtWidgets.QSpinBox()
+        self.ex_daily_trades_total.setRange(0, 10_000)
+        self.ex_daily_trades_total.setSpecialValueText("Disabled")
+        self.ex_daily_trades_total.setValue(0)
+        ex_form.addRow("Max daily trades total", self.ex_daily_trades_total)
+
         self.ex_enable_trailing = QtWidgets.QCheckBox("Enable trailing stop")
         self.ex_enable_trailing.setChecked(False)
         ex_form.addRow(self.ex_enable_trailing)
@@ -785,6 +830,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "final": final,
                 "outputs": outputs,
             }),
+            enforce_single_position_per_symbol=bool(self.ex_single_pos_per_symbol.isChecked()),
+            max_positions_per_symbol=int(self.ex_max_pos_per_symbol.value()),
+            max_total_open_positions=int(self.ex_max_total_positions.value()),
+            one_entry_per_closed_bar=bool(self.ex_one_entry_per_bar.isChecked()),
+            enable_trade_cooldown=bool(self.ex_enable_cooldown.isChecked()),
+            trade_cooldown_minutes=int(self.ex_cooldown_minutes.value()),
+            enable_max_daily_trades=bool(self.ex_enable_daily_limits.isChecked()),
+            max_daily_trades_per_symbol=int(self.ex_daily_trades_per_symbol.value()),
+            max_daily_trades_total=int(self.ex_daily_trades_total.value()),
         )
 
         self.chk_allow.stateChanged.connect(lambda _: self.log.write(f"[UI] Allow New Trades = {self.chk_allow.isChecked()}"))
@@ -890,9 +944,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 item = self.ex_block_symbols.item(i)
                 item.setSelected(item.text() in blocked)
 
+            orch = getattr(self, "orch", None)
+            if orch is not None:
+                self.ex_single_pos_per_symbol.setChecked(bool(getattr(orch, "enforce_single_position_per_symbol", True)))
+                self.ex_max_pos_per_symbol.setValue(max(1, int(getattr(orch, "max_positions_per_symbol", 1))))
+                self.ex_max_total_positions.setValue(max(0, int(getattr(orch, "max_total_open_positions", 0))))
+                self.ex_one_entry_per_bar.setChecked(bool(getattr(orch, "one_entry_per_closed_bar", True)))
+                self.ex_enable_cooldown.setChecked(bool(getattr(orch, "enable_trade_cooldown", False)))
+                self.ex_cooldown_minutes.setValue(max(0, int(getattr(orch, "trade_cooldown_minutes", 0))))
+                self.ex_enable_daily_limits.setChecked(bool(getattr(orch, "enable_max_daily_trades", False)))
+                self.ex_daily_trades_per_symbol.setValue(max(0, int(getattr(orch, "max_daily_trades_per_symbol", 0))))
+                self.ex_daily_trades_total.setValue(max(0, int(getattr(orch, "max_daily_trades_total", 0))))
+
         except Exception:
             pass
-
     @QtCore.Slot()
     def close_positions_by_mode(self):
         try:
@@ -990,6 +1055,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     # ---------- Experiments ----------
+
     @QtCore.Slot()
     def refresh_experiments(self):
         path = self._experiments_path()
@@ -1528,33 +1594,47 @@ class MainWindow(QtWidgets.QMainWindow):
             self.executor.allow_weekends = bool(self.ex_allow_weekends.isChecked())
             self.executor.max_retries = int(self.ex_max_retries.value())
             self.executor.retry_delay_ms = int(self.ex_retry_delay.value())
-            
-            blocked_symbols = set()
-            for item in self.ex_block_symbols.selectedItems():
-                blocked_symbols.add(item.text().strip())
 
+            blocked_symbols = {item.text().strip() for item in self.ex_block_symbols.selectedItems() if item.text().strip()}
             self.executor.blocked_symbols = blocked_symbols
             self.executor.enable_trailing_stop = bool(self.ex_enable_trailing.isChecked())
             self.executor.trailing_trigger_rr = float(self.ex_trailing_trigger_rr.value())
             self.executor.trailing_distance_rr = float(self.ex_trailing_distance_rr.value())
             self.executor.trailing_step_rr = float(self.ex_trailing_step_rr.value())
 
+            if hasattr(self, "orch") and self.orch is not None:
+                self.orch.update_entry_policy(
+                    enforce_single_position_per_symbol=bool(self.ex_single_pos_per_symbol.isChecked()),
+                    max_positions_per_symbol=int(self.ex_max_pos_per_symbol.value()),
+                    max_total_open_positions=int(self.ex_max_total_positions.value()),
+                    one_entry_per_closed_bar=bool(self.ex_one_entry_per_bar.isChecked()),
+                    enable_trade_cooldown=bool(self.ex_enable_cooldown.isChecked()),
+                    trade_cooldown_minutes=int(self.ex_cooldown_minutes.value()),
+                    enable_max_daily_trades=bool(self.ex_enable_daily_limits.isChecked()),
+                    max_daily_trades_per_symbol=int(self.ex_daily_trades_per_symbol.value()),
+                    max_daily_trades_total=int(self.ex_daily_trades_total.value()),
+                )
+
             fixed = "ON" if self.executor.force_symbol_fixed_lot else "OFF"
             spread = "ON" if self.executor.enable_spread_filter else "OFF"
             session = "ON" if self.executor.enable_session_filter else "OFF"
             trailing = "ON" if getattr(self.executor, "enable_trailing_stop", False) else "OFF"
             blocked_txt = ", ".join(sorted(self.executor.blocked_symbols)) if getattr(self.executor, "blocked_symbols", None) else "—"
+            single_pos = "ON" if self.ex_single_pos_per_symbol.isChecked() else "OFF"
+            one_bar = "ON" if self.ex_one_entry_per_bar.isChecked() else "OFF"
+            cooldown = "ON" if self.ex_enable_cooldown.isChecked() else "OFF"
+            daily_limits = "ON" if self.ex_enable_daily_limits.isChecked() else "OFF"
 
             self.lbl_exec_guard_status.setText(
                 "spread={spread} (max {max_spread}pt)\n"
-                "session={session} ({start}-{end})\n"
-                "weekends={weekends}\n"
-                "retries={retries}@{delay}ms\n"
-                "fixed_lot={fixed}\n"
+                "session={session} ({start}-{end}) weekends={weekends}\n"
+                "retries={retries}@{delay}ms fixed_lot={fixed}\n"
                 "fixed_sl_tp={fixed_sl_tp} (offset {offset:g})\n"
-                "trailing={trailing} (trigger {trigger:.2f}R, distance {distance:.2f}R, step {step:.2f}R)"
-                "blocked_symbols={blocked}"
-                .format(
+                "single_pos={single_pos} max/symbol={max_symbol} max_total={max_total}\n"
+                "one_per_bar={one_bar} cooldown={cooldown} ({cooldown_min}m)\n"
+                "daily_limits={daily_limits} per_symbol={daily_symbol} total={daily_total}\n"
+                "trailing={trailing} (trigger {trigger:.2f}R, distance {distance:.2f}R, step {step:.2f}R)\n"
+                "blocked_symbols={blocked}".format(
                     spread=spread,
                     max_spread=self.executor.max_spread_points,
                     session=session,
@@ -1566,6 +1646,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     fixed=fixed,
                     fixed_sl_tp="ON" if getattr(self.executor, "boom_crash_fixed_sl_tp", False) else "OFF",
                     offset=getattr(self.executor, "boom_crash_sl_tp_offset", 0.0),
+                    single_pos=single_pos,
+                    max_symbol=int(self.ex_max_pos_per_symbol.value()),
+                    max_total=int(self.ex_max_total_positions.value()),
+                    one_bar=one_bar,
+                    cooldown=cooldown,
+                    cooldown_min=int(self.ex_cooldown_minutes.value()),
+                    daily_limits=daily_limits,
+                    daily_symbol=int(self.ex_daily_trades_per_symbol.value()),
+                    daily_total=int(self.ex_daily_trades_total.value()),
                     trailing=trailing,
                     trigger=float(getattr(self.executor, "trailing_trigger_rr", 1.0)),
                     distance=float(getattr(self.executor, "trailing_distance_rr", 0.5)),
@@ -1573,10 +1662,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     blocked=blocked_txt,
                 )
             )
-
-            self.log.write("[EXEC_GUARD] Applied execution guard settings")
+            self.log.write(
+                f"[EXEC GUARD] Applied single_pos={single_pos} max/symbol={int(self.ex_max_pos_per_symbol.value())} "
+                f"max_total={int(self.ex_max_total_positions.value())} one_per_bar={one_bar} "
+                f"cooldown={cooldown}({int(self.ex_cooldown_minutes.value())}m) "
+                f"daily_limits={daily_limits} per_symbol={int(self.ex_daily_trades_per_symbol.value())} "
+                f"total={int(self.ex_daily_trades_total.value())}"
+            )
         except Exception as e:
-            self.log.write(f"[EXEC_GUARD] Apply failed: {e}")
+            self.log.write(f"[EXEC GUARD] Apply failed: {e}")
 
     # ---------- UI refreshers ----------
     @QtCore.Slot()
