@@ -31,7 +31,7 @@ from strategies.boom_spike_trend import BoomSpikeTrendStrategy
 
 from config.settings import (
     SYMBOL_LIST, TIMEFRAME_LIST, PRIMARY_TIMEFRAME, LOOP_SLEEP_SECONDS,
-    DB_PATH, USE_ML_STRATEGY, ML_MODEL_PATH,
+    DB_PATH, USE_ML_STRATEGY, ML_MODEL_PATH, ML_CANDIDATES_DIR, FEATURE_SET_VERSION,
     ENSEMBLE_MIN_CONF, ENSEMBLE_MIN_VOTE_GAP, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS, REGIME_WEIGHT_MULTIPLIERS, 
     DATA_QUALITY_OUT_DIR,BACKTEST_STARTING_CASH, BACKTEST_WARMUP_BARS, BACKTEST_OUT_DIR
 )
@@ -736,6 +736,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bt_primary_tf.setCurrentText(str(PRIMARY_TIMEFRAME))
         bt_form.addRow("Primary TF", self.bt_primary_tf)
 
+        self.bt_use_candidate_model = QtWidgets.QCheckBox("Use candidate model path for ML backtests")
+        self.bt_use_candidate_model.setChecked(False)
+        bt_form.addRow("ML model override", self.bt_use_candidate_model)
+
+        self.bt_ml_model_path = QtWidgets.QLineEdit("")
+        self.bt_ml_model_path.setPlaceholderText("Optional .joblib path for candidate model")
+        bt_form.addRow("Candidate model path", self.bt_ml_model_path)
+
         self.bt_start = QtWidgets.QLineEdit("")
         self.bt_end = QtWidgets.QLineEdit("")
         bt_form.addRow("Start (YYYY-MM-DD, optional)", self.bt_start)
@@ -819,9 +827,12 @@ class MainWindow(QtWidgets.QMainWindow):
         exp_top = QtWidgets.QHBoxLayout()
         self.btn_exp_refresh = QtWidgets.QPushButton("Refresh")
         self.btn_exp_promote = QtWidgets.QPushButton("Promote Selected Model")
+        self.btn_exp_use_for_backtest = QtWidgets.QPushButton("Use Selected Model For Backtest")
+        self.btn_exp_use_for_backtest.clicked.connect(self.use_selected_experiment_model_for_backtest)
         exp_top.addWidget(self.btn_exp_refresh)
         exp_top.addStretch(1)
         exp_top.addWidget(self.btn_exp_promote)
+        exp_top.addWidget(self.btn_exp_use_for_backtest)
         exp_layout.addLayout(exp_top)
 
         self.tbl_exp = QtWidgets.QTableWidget(0, 8)
@@ -1133,6 +1144,56 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "btn_backfill_data_gaps"):
             self.btn_backfill_data_gaps.setEnabled(enabled)
 
+    def _candidate_model_path(self) -> str:
+        symbol = self.train_symbol.currentText().strip()
+        tf = int(self.train_timeframe.currentData())
+        model_version = (self.train_model_version.text() or "").strip() or f"ml_{datetime.utcnow().strftime('%Y-%m-%d')}"
+        schema_version = int(self.train_schema_version.value())
+
+        symbol_safe = self._safe_fs_name(symbol)
+        tf_safe = str(tf)
+        date_tag = datetime.utcnow().strftime("%Y-%m-%d")
+
+        filename = (
+            f"{model_version}"
+            f"__{symbol_safe}"
+            f"__tf{tf_safe}"
+            f"__h{LABEL_HORIZON_BARS}"
+            f"__fs{FEATURE_SET_VERSION}"
+            f"__sv{schema_version}"
+            f"__{date_tag}.joblib"
+        )
+
+        return os.path.abspath(
+            os.path.join(
+                ML_CANDIDATES_DIR,
+                symbol_safe,
+                f"tf_{tf_safe}",
+                filename,
+            )
+        )
+
+    @QtCore.Slot()
+    def use_selected_experiment_model_for_backtest(self):
+        row = self.tbl_exp.currentRow()
+        if row < 0:
+            self.log.write("[EXP] No experiment selected")
+            return
+
+        model_path_item = self.tbl_exp.item(row, 7)
+        if not model_path_item:
+            self.log.write("[EXP] Selected row has no model path")
+            return
+
+        model_path = model_path_item.text().strip()
+        if not model_path:
+            self.log.write("[EXP] Selected row has empty model path")
+            return
+
+        self.bt_ml_model_path.setText(model_path)
+        self.bt_use_candidate_model.setChecked(True)
+        self.log.write(f"[EXP] Backtest model path set -> {model_path}")
+
     # ---------- Strategy building / hot updates ----------
     def _build_strategies(self, enabled: Optional[dict] = None):
         enabled = enabled or {
@@ -1347,7 +1408,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             os.makedirs(os.path.dirname(ML_MODEL_PATH) or ".", exist_ok=True)
             shutil.copy2(model_path, ML_MODEL_PATH)
-            self.log.write(f"[EXP] Promoted model -> {ML_MODEL_PATH}")
+            self.log.write(f"[EXP] Promoted model: {model_path} -> {ML_MODEL_PATH}")
+            self.lbl_exp_status.setText(f"Experiments: promoted -> {os.path.basename(model_path)}")
             self.btn_reload_ml.setEnabled(True)
         except Exception as e:
             self.log.write(f"[EXP] Promote failed: {e}")
@@ -1373,10 +1435,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
         primary_tf = str(self.bt_primary_tf.currentData())
 
+        ml_model_path_for_backtest = str(ML_MODEL_PATH)
+        if self.bt_use_candidate_model.isChecked():
+            candidate_path = (self.bt_ml_model_path.text() or "").strip()
+            if candidate_path:
+                ml_model_path_for_backtest = candidate_path
+                
+        if self.bt_use_candidate_model.isChecked():
+            candidate_path = (self.bt_ml_model_path.text() or "").strip()
+            if not candidate_path:
+                self.lbl_bt_status.setText("Backtest: candidate model override is enabled but no path is set")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+                return
+            if not os.path.exists(candidate_path):
+                self.lbl_bt_status.setText("Backtest: candidate model path not found")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+                self.log.write(f"[BACKTEST] Candidate model path not found: {candidate_path}")
+                return
+    
         base_cmd_common = [
             sys.executable,
             self._script_path("run_backtest.py"),
             "--primary-tf", primary_tf,
+            "--ml-model-path", ml_model_path_for_backtest,
             "--tfs", *tfs,
             "--cash", str(BACKTEST_STARTING_CASH),
             "--warmup", str(BACKTEST_WARMUP_BARS),
@@ -1561,7 +1642,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log.write("[TRAIN] Training already running")
             return
 
-        self.lbl_train_status.setText("Training: running…")
+        self.lbl_train_status.setText("Training: running candidate build…")
         self.btn_export_ds.setEnabled(False)
         self.btn_train_ml.setEnabled(False)
         self.btn_export_train.setEnabled(False)
@@ -1628,7 +1709,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         self._run_training_steps([cmd])
 
-
     @QtCore.Slot()
     def train_model(self):
         out_csv = (self.train_csv.text() or "").strip() or "dataset.csv"
@@ -1636,14 +1716,12 @@ class MainWindow(QtWidgets.QMainWindow):
         schema_version = int(self.train_schema_version.value())
         strict = bool(self.train_strict_schema.isChecked())
 
-        # Make sure training always saves to the exact same path the bot loads from.
-        # (train_model.py defaults to ML_MODEL_PATH, but explicit is safer)
-        from config.settings import ML_MODEL_PATH
+        candidate_model_path = self._candidate_model_path()
 
-        self.lbl_train_status.setText("Training: training model…")
+        self.lbl_train_status.setText("Training: training candidate model…")
         self.log.write(
-            f"[ML] Train model: csv={out_csv} model_version={model_version} "
-            f"schema_version={schema_version} strict={strict} -> {ML_MODEL_PATH}"
+            f"[ML] Train candidate: csv={out_csv} model_version={model_version} "
+            f"schema_version={schema_version} strict={strict} -> {candidate_model_path}"
         )
 
         cmd = [
@@ -1652,7 +1730,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "-m",
             "scripts.train_model",
             "--csv", out_csv,
-            "--model-path", str(ML_MODEL_PATH),
+            "--model-path", str(candidate_model_path),
             "--model-version", model_version,
             "--schema-version", str(schema_version),
         ]
@@ -1660,12 +1738,6 @@ class MainWindow(QtWidgets.QMainWindow):
             cmd.append("--strict-schema")
 
         self._run_training_steps([cmd])
-
-        # NOTE:
-        # If _run_training_steps is async (QProcess), enabling here may be premature.
-        # Prefer enabling in the "finished" callback inside _run_training_steps.
-        # Still, it’s safe to allow the user to click Reload only after training finishes.
-        # (See recommended change below.)
 
     @QtCore.Slot()
     def export_and_train(self):
@@ -1676,12 +1748,13 @@ class MainWindow(QtWidgets.QMainWindow):
         schema_version = int(self.train_schema_version.value())
         strict = bool(self.train_strict_schema.isChecked())
 
-        from config.settings import ML_MODEL_PATH
+        candidate_model_path = self._candidate_model_path()
 
-        self.lbl_train_status.setText(f"Training: export + train… ({symbol}, tf={tf})")
+        self.lbl_train_status.setText(f"Training: export + train candidate… ({symbol}, tf={tf})")
         self.log.write(
-            f"[ML] Export+Train: symbol={symbol} tf={tf} csv={out_csv} "
-            f"model_version={model_version} schema_version={schema_version} strict={strict} -> {ML_MODEL_PATH}"
+            f"[ML] Export+Train candidate: symbol={symbol} tf={tf} csv={out_csv} "
+            f"model_version={model_version} schema_version={schema_version} strict={strict} "
+            f"-> {candidate_model_path}"
         )
 
         export_cmd = [
@@ -1700,7 +1773,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "-m",
             "scripts.train_model",
             "--csv", out_csv,
-            "--model-path", str(ML_MODEL_PATH),
+            "--model-path", str(candidate_model_path),
             "--model-version", model_version,
             "--schema-version", str(schema_version),
         ]

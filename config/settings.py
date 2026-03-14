@@ -33,6 +33,7 @@ FEATURE_SET_VERSION = 1
 # --- ML ---
 USE_ML_STRATEGY = True
 ML_MODEL_PATH = "models/ml_strategy.joblib"
+ML_CANDIDATES_DIR = "models/candidates"
 
 # --- ML Experiment tracking ---
 # Training script appends one JSON line per run.

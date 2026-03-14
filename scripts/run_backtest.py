@@ -91,7 +91,14 @@ def _csv_to_set(s: str) -> set[str]:
     return {x.strip() for x in str(s or "").split(",") if x.strip()}
 
 
-def build_strategies(*, use_rsi: bool = True, use_breakout: bool = True, use_ml: bool = USE_ML_STRATEGY, use_boom: bool = True):
+def build_strategies(
+    *,
+    use_rsi: bool = True,
+    use_breakout: bool = True,
+    use_ml: bool = USE_ML_STRATEGY,
+    use_boom: bool = True,
+    ml_model_path: str | None = None,
+):
     strategies = []
 
     if use_rsi:
@@ -101,8 +108,10 @@ def build_strategies(*, use_rsi: bool = True, use_breakout: bool = True, use_ml:
     if use_boom:
         strategies.append(BoomSpikeTrendStrategy())
 
-    if use_ml and USE_ML_STRATEGY and os.path.exists(ML_MODEL_PATH):
-        bundle = joblib.load(ML_MODEL_PATH)
+    chosen_ml_path = str(ml_model_path or ML_MODEL_PATH).strip()
+
+    if use_ml and USE_ML_STRATEGY and chosen_ml_path and os.path.exists(chosen_ml_path):
+        bundle = joblib.load(chosen_ml_path)
         if isinstance(bundle, dict) and "model" in bundle:
             strategies.append(
                 MLStrategy(
@@ -119,6 +128,7 @@ def build_strategies(*, use_rsi: bool = True, use_breakout: bool = True, use_ml:
             )
         else:
             strategies.append(MLStrategy(bundle))
+
     return strategies
 
 
@@ -132,6 +142,7 @@ def main() -> None:
     ap.add_argument("--warmup", type=int, default=BACKTEST_WARMUP_BARS)
     ap.add_argument("--out", type=str, default=BACKTEST_OUT_DIR)
     ap.add_argument("--tag", type=str, default="next_open_mvp")
+    ap.add_argument("--ml-model-path", type=str, default=str(ML_MODEL_PATH), help="Optional explicit ML model bundle path for this backtest. Defaults to the promoted live model path.")
     ap.add_argument("--start", type=str, default="", help="Optional start date YYYY-MM-DD (UTC)")
     ap.add_argument("--end", type=str, default="", help="Optional end date YYYY-MM-DD (UTC)")
     ap.add_argument("--min-vote-gap", type=float, default=ENSEMBLE_MIN_VOTE_GAP, help="Minimum normalized vote gap required to act")
@@ -216,6 +227,7 @@ def main() -> None:
         use_breakout=bool(args.use_breakout),
         use_ml=bool(args.use_ml),
         use_boom=bool(args.use_boom),
+        ml_model_path=args.ml_model_path,
     )
     if not strategies:
         raise SystemExit("No strategies enabled for backtest")
@@ -278,6 +290,7 @@ def main() -> None:
         "primary_tf": args.primary_tf,
         "tfs": args.tfs,
         "tag": args.tag,
+        "ml_model_path": str(args.ml_model_path),
         "strategy_settings": {
             "use_rsi": bool(args.use_rsi),
             "use_breakout": bool(args.use_breakout),
