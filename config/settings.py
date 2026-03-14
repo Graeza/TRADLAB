@@ -43,6 +43,7 @@ EXPERIMENT_LOG_PATH = "ml/experiments/experiments.jsonl"
 BACKTEST_STARTING_CASH = 10_000.0
 BACKTEST_WARMUP_BARS = 200
 BACKTEST_OUT_DIR = "backtests/latest"
+DATA_QUALITY_OUT_DIR = "backtests/data_quality"
 
 # --- Ensemble ---
 ENSEMBLE_MIN_CONF = 0.55

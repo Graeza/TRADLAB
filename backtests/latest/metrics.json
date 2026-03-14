@@ -1,13 +1,13 @@
 {
   "metrics": {
     "start_equity": 10000.0,
-    "end_equity": 10000.0,
-    "total_return": 0.0,
-    "max_drawdown": 0.0,
-    "n_trades": 0,
-    "win_rate": 0.0,
-    "avg_trade_pnl": 0.0,
-    "profit_factor": null
+    "end_equity": 9990.187500000004,
+    "total_return": -0.0009812499999996005,
+    "max_drawdown": -0.0032444976002918295,
+    "n_trades": 43,
+    "win_rate": 0.627906976744186,
+    "avg_trade_pnl": -0.22819767441860994,
+    "profit_factor": 0.8773437499999972
   },
   "extra": {
     "symbol": "Boom 300 Index",
@@ -20,10 +20,10 @@
     ],
     "tag": "next_open_mvp",
     "strategy_settings": {
-      "use_rsi": false,
+      "use_rsi": true,
       "use_breakout": true,
-      "use_ml": false,
-      "use_boom": false,
+      "use_ml": true,
+      "use_boom": true,
       "weights": {
         "RSI_EMA": 1.0,
         "BREAKOUT": 1.0,
@@ -44,9 +44,7 @@
     },
     "execution_guard": {
       "allow_new_trades": true,
-      "blocked_symbols": [
-        "Boom 300 Index"
-      ],
+      "blocked_symbols": [],
       "enable_session_filter": false,
       "session_start_hour": 0,
       "session_end_hour": 24,
@@ -57,7 +55,7 @@
       "fixed_sl_tp": true,
       "sl_tp_offset": 10.0,
       "enable_trailing_stop": true,
-      "trailing_trigger_rr": 1.0,
+      "trailing_trigger_rr": 0.5000000000000001,
       "trailing_distance_rr": 0.5,
       "trailing_step_rr": 0.1,
       "max_retries": 0,

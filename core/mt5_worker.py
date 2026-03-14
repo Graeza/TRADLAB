@@ -127,6 +127,9 @@ class MT5Client:
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
         return self._call(mt5.copy_rates_from_pos, symbol, timeframe, start_pos, count)
 
+    def copy_rates_range(self, symbol: str, timeframe: int, date_from, date_to):
+        return self._call(mt5.copy_rates_range, symbol, timeframe, date_from, date_to)
+
     def order_send(self, request: dict):
         return self._call(mt5.order_send, request=request)
 

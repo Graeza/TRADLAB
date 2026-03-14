@@ -1,32 +1,39 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 import pandas as pd
 
 from strategies.base import Strategy, StrategyResult, Signal
+from utils.indicators import add_h1_context_to_df
+
+
 class MLStrategy(Strategy):
     name = "ML"
 
     def __init__(
         self,
         model,
-        feature_cols: list[str] | None = None,
+        feature_cols: Optional[List[str]] = None,
         *,
-        model_version: str | None = None,
+        model_version: Optional[str] = None,
         schema_version: int = 1,
         strict_schema: bool = True,
-        class_to_signal: dict[object, str] | None = None,
-        drop_cols: list[str] | None = None,
-        fillna_value: float | None = None,
-        feature_set_version: int | None = None,
-        feature_set_id: str | None = None,
+        class_to_signal: Optional[Dict[object, str]] = None,
+        drop_cols: Optional[List[str]] = None,
+        fillna_value: Optional[float] = None,
+        feature_set_version: Optional[int] = None,
+        feature_set_id: Optional[str] = None,
+        use_h1_meta: bool = True,
+        h1_tf: int = 60,
+        h1_sr_buffer_atr_mult: float = 0.50,
     ):
-        """ML-backed strategy with feature-schema enforcement.
+        """
+        ML-backed strategy with feature-schema enforcement.
 
-        The core failure mode in production ML trading systems is *schema drift*:
+        The core failure mode in production ML trading systems is schema drift:
         columns added/removed/renamed, or ordering changes between training and live.
 
         This strategy can run in a strict mode that will REFUSE to trade if:
@@ -34,27 +41,8 @@ class MLStrategy(Strategy):
           - required features are missing
           - features contain NaN/inf (unless fillna_value is provided)
 
-        Parameters
-        ----------
-        model:
-            Any sklearn-like estimator or pipeline implementing predict / predict_proba.
-        feature_cols:
-            Explicit trained feature list. If provided, treated as the expected schema.
-            If None, we try model.feature_names_in_ (sklearn).
-            If that isn't available, we fall back to inferring numeric columns from df.
-        model_version:
-            Optional string to identify model build/version (recommended via saved bundle).
-        schema_version:
-            Optional integer for your own schema versioning (recommended via saved bundle).
-        strict_schema:
-            If True (default), and we have an expected schema, reject when live schema differs.
-        class_to_signal:
-            Optional mapping from model class labels to {BUY, SELL, HOLD}.
-        drop_cols:
-            Optional extra columns to drop when inferring numeric columns.
-        fillna_value:
-            If None (default), any NaN/inf in features rejects the signal (HOLD).
-            If set (e.g., 0.0), NaN/inf are replaced with that value.
+        H1 context is attached to meta/debug output only by default.
+        It is NOT fed into model inference unless your trained schema already includes it.
         """
         self.model = model
         self.feature_cols = list(feature_cols) if feature_cols is not None else None
@@ -67,8 +55,11 @@ class MLStrategy(Strategy):
         self.feature_set_version = int(feature_set_version) if feature_set_version is not None else None
         self.feature_set_id = str(feature_set_id) if feature_set_id is not None else None
 
-        # Expected schema (if we can resolve it now)
-        self._expected_cols: list[str] | None = None
+        self.use_h1_meta = bool(use_h1_meta)
+        self.h1_tf = int(h1_tf)
+        self.h1_sr_buffer_atr_mult = float(h1_sr_buffer_atr_mult)
+
+        self._expected_cols = None  # type: Optional[List[str]]
         if self.feature_cols:
             self._expected_cols = list(self.feature_cols)
         else:
@@ -82,106 +73,114 @@ class MLStrategy(Strategy):
         self._expected_schema_id = self._schema_id(self._expected_cols) if self._expected_cols else None
 
     @staticmethod
-    def _schema_id(cols: list[str] | None) -> str | None:
+    def _schema_id(cols: Optional[List[str]]) -> Optional[str]:
         if not cols:
             return None
         payload = "\n".join([str(c) for c in cols]).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()[:12]
 
-    def _default_drop_cols(self) -> set[str]:
-        # Common non-features that may be present in your pipeline DB/features tables
-        return {
-            "time", "dt", "datetime", "timestamp",
-            "symbol", "tf", "timeframe",
-            "label", "target", "y",
-            "feature_set_version", "feature_set_id",
-        } | set(self.drop_cols)
+    def _infer_live_feature_cols(self, df: pd.DataFrame) -> List[str]:
+        cols = []
+        for c in df.columns:
+            if c in self.drop_cols:
+                continue
+            if pd.api.types.is_numeric_dtype(df[c]):
+                cols.append(str(c))
+        return cols
 
-    def _infer_live_feature_cols(self, df: pd.DataFrame) -> list[str]:
-        numeric = df.select_dtypes(include=["number"]).copy()
-        numeric.drop(columns=[c for c in self._default_drop_cols() if c in numeric.columns], inplace=True, errors="ignore")
-        return list(numeric.columns)
+    @staticmethod
+    def _pred_to_signal(pred: Any) -> str:
+        s = str(pred).upper()
+        if s in {"BUY", "SELL", "HOLD"}:
+            return s
+
+        # common numeric conventions
+        try:
+            x = int(pred)
+            if x > 0:
+                return "BUY"
+            if x < 0:
+                return "SELL"
+            return "HOLD"
+        except Exception:
+            return "HOLD"
+
+    def _classes_default_mapping(self) -> Dict[object, str]:
+        cls = list(getattr(self.model, "classes_", []) or [])
+        if set(cls) == {-1, 0, 1}:
+            return {-1: "SELL", 0: "HOLD", 1: "BUY"}
+        if set(cls) == {0, 1, 2}:
+            return {0: "SELL", 1: "HOLD", 2: "BUY"}
+        if set(cls) == {0, 1}:  # default: 0=SELL, 1=BUY
+            return {0: "SELL", 1: "BUY"}
+        return {}
 
     def _clean_X(self, X: pd.DataFrame) -> pd.DataFrame:
         X = X.replace([np.inf, -np.inf], np.nan)
         if self.fillna_value is None:
             if X.isna().any().any():
-                raise ValueError("NaN/inf in feature vector")
-        else:
-            X = X.fillna(self.fillna_value)
-        return X
+                bad_cols = [str(c) for c in X.columns[X.isna().any()].tolist()]
+                raise ValueError(f"NaN/inf in features: {bad_cols[:25]}")
+            return X
+        return X.fillna(float(self.fillna_value))
 
-    def _pred_to_signal(self, pred) -> str:
-        # Explicit mapping wins
-        if self.class_to_signal is not None and pred in self.class_to_signal:
-            return str(self.class_to_signal[pred]).upper()
+    @staticmethod
+    def _find_atr_col(df: pd.DataFrame) -> Optional[str]:
+        for c in ("ATR", "ATR14", "atr", "atr14"):
+            if c in df.columns:
+                return c
+        return None
 
-        # Direct string labels
-        if isinstance(pred, str):
-            up = pred.upper()
-            if up in ("BUY", "SELL", "HOLD"):
-                return up
-
-        # Numeric mapping
-        try:
-            v = float(pred)
-            return "BUY" if v > 0 else "SELL" if v < 0 else "HOLD"
-        except Exception:
-            return "HOLD"
-
-    def _classes_default_mapping(self) -> dict[object, str]:
-        classes = getattr(self.model, "classes_", None)
-        if classes is None:
-            return {}
-
-        try:
-            cls = list(classes)
-        except Exception:
-            return {}
-
-        # Common supervised label sets
-        if set(cls) >= {-1, 1}:  # {-1,0,1} or {-1,1}
-            mapping = {-1: "SELL", 1: "BUY"}
-            if 0 in set(cls):
-                mapping[0] = "HOLD"
-            return mapping
-
-        if set(cls) == {0, 1}:  # default: 0=SELL, 1=BUY
-            return {0: "SELL", 1: "BUY"}
-
-        return {}
-
-    def _evaluate(self, data_by_tf: dict[int, pd.DataFrame]):
+    def _evaluate(self, data_by_tf: Dict[int, pd.DataFrame]):
         df = next(iter(data_by_tf.values()))
         if df is None or df.empty:
             return {
                 "name": self.name,
                 "signal": "HOLD",
-                    "confidence": 0.0,
+                "confidence": 0.0,
                 "meta": {"reason": "no_data"},
             }
 
-        # Live trading: ALWAYS use the last CLOSED candle (exclude forming bar)
-        if len(df) < 2:
+        # DataFetcher already returns closed-bar data, so use the latest row directly.
+        if len(df) < 1:
             return {
                 "name": self.name,
                 "signal": "HOLD",
-                    "confidence": 0.0,
+                "confidence": 0.0,
                 "meta": {"reason": "insufficient_bars"},
             }
 
-        closed = df.iloc[:-1]
-        if closed is None or closed.empty:
-            return {
-                "name": self.name,
-                "signal": "HOLD",
-                    "confidence": 0.0,
-                "meta": {"reason": "insufficient_closed_bars"},
+        # Keep a separate debug/context copy so we do NOT mutate the inference schema.
+        debug_df = df
+        if self.use_h1_meta:
+            h1_df = data_by_tf.get(self.h1_tf)
+            if h1_df is not None and not h1_df.empty:
+                try:
+                    debug_df = add_h1_context_to_df(
+                        df.copy(),
+                        h1_df,
+                        atr_col=self._find_atr_col(df),
+                        sr_atr_buffer_mult=self.h1_sr_buffer_atr_mult,
+                    )
+                except Exception:
+                    debug_df = df
+
+        meta_ctx = {}
+        try:
+            last_dbg = debug_df.iloc[-1]
+            meta_ctx = {
+                "h1_trend": str(last_dbg.get("h1_trend", "neutral")).lower(),
+                "h1_support": last_dbg.get("h1_support"),
+                "h1_resistance": last_dbg.get("h1_resistance"),
+                "dist_to_h1_support": last_dbg.get("dist_to_h1_support"),
+                "dist_to_h1_resistance": last_dbg.get("dist_to_h1_resistance"),
+                "near_h1_support": bool(last_dbg.get("near_h1_support", False)),
+                "near_h1_resistance": bool(last_dbg.get("near_h1_resistance", False)),
             }
+        except Exception:
+            meta_ctx = {}
 
-        df = closed
-
-        # --- Feature set version gating (optional but recommended) ---
+        # --- Feature set version gating ---
         if self.feature_set_version is not None:
             if "feature_set_version" not in df.columns:
                 return {
@@ -189,6 +188,7 @@ class MLStrategy(Strategy):
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "meta": {
+                        **meta_ctx,
                         "reason": "missing_feature_set_version",
                         "expected_feature_set_version": self.feature_set_version,
                         "schema_version": self.schema_version,
@@ -205,6 +205,7 @@ class MLStrategy(Strategy):
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "meta": {
+                        **meta_ctx,
                         "reason": "feature_set_version_mismatch",
                         "expected_feature_set_version": self.feature_set_version,
                         "live_feature_set_version": live_v,
@@ -220,6 +221,7 @@ class MLStrategy(Strategy):
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "meta": {
+                        **meta_ctx,
                         "reason": "missing_feature_set_id",
                         "expected_feature_set_id": self.feature_set_id,
                         "schema_version": self.schema_version,
@@ -233,6 +235,7 @@ class MLStrategy(Strategy):
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "meta": {
+                        **meta_ctx,
                         "reason": "feature_set_id_mismatch",
                         "expected_feature_set_id": self.feature_set_id,
                         "live_feature_set_id": live_id,
@@ -254,7 +257,6 @@ class MLStrategy(Strategy):
                 extra = [c for c in live_cols if c not in expected_cols]
 
                 first_mismatch = None
-                # find first index mismatch when both lists have at least one element
                 for i in range(min(len(live_cols), len(expected_cols))):
                     if live_cols[i] != expected_cols[i]:
                         first_mismatch = {"index": i, "expected": expected_cols[i], "got": live_cols[i]}
@@ -265,6 +267,7 @@ class MLStrategy(Strategy):
                     "signal": "HOLD",
                     "confidence": 0.0,
                     "meta": {
+                        **meta_ctx,
                         "reason": "feature_schema_mismatch",
                         "expected_n": len(expected_cols),
                         "got_n": len(live_cols),
@@ -282,8 +285,6 @@ class MLStrategy(Strategy):
 
             feature_cols = expected_cols
         else:
-            # Non-strict / unknown expected schema:
-            # use explicit feature_cols if provided, else model.feature_names_in_, else inferred live numeric columns
             if self.feature_cols is not None:
                 feature_cols = list(self.feature_cols)
             else:
@@ -297,16 +298,21 @@ class MLStrategy(Strategy):
                     feature_cols = live_cols
 
         if not feature_cols:
-            return {"name": self.name, "signal": "HOLD", "confidence": 0.0, "meta": {"reason": "no_features"}}
+            return {
+                "name": self.name,
+                "signal": "HOLD",
+                "confidence": 0.0,
+                "meta": {**meta_ctx, "reason": "no_features"},
+            }
 
-        # Missing features gate (even in non-strict mode)
         missing = [c for c in feature_cols if c not in df.columns]
         if missing:
             return {
                 "name": self.name,
                 "signal": "HOLD",
-                    "confidence": 0.0,
+                "confidence": 0.0,
                 "meta": {
+                    **meta_ctx,
                     "reason": "missing_features",
                     "missing": missing[:25],
                     "missing_n": len(missing),
@@ -317,16 +323,16 @@ class MLStrategy(Strategy):
                 },
             }
 
-        # Build feature vector in the EXACT expected order
         try:
-            X = df.loc[df.index[-1:], feature_cols].copy()  # df already excludes forming bar
+            X = df.loc[df.index[-1:], feature_cols].copy()
             X = self._clean_X(X)
         except Exception as e:
             return {
                 "name": self.name,
                 "signal": "HOLD",
-                    "confidence": 0.0,
+                "confidence": 0.0,
                 "meta": {
+                    **meta_ctx,
                     "reason": "bad_features",
                     "error": str(e),
                     "expected_schema_id": expected_schema_id,
@@ -336,7 +342,6 @@ class MLStrategy(Strategy):
                 },
             }
 
-        # Predict
         conf = 0.55
         signal = "HOLD"
         try:
@@ -358,8 +363,9 @@ class MLStrategy(Strategy):
             return {
                 "name": self.name,
                 "signal": "HOLD",
-                    "confidence": 0.0,
+                "confidence": 0.0,
                 "meta": {
+                    **meta_ctx,
                     "reason": "model_error",
                     "error": str(e),
                     "expected_schema_id": expected_schema_id,
@@ -374,6 +380,7 @@ class MLStrategy(Strategy):
             "signal": signal,
             "confidence": float(conf),
             "meta": {
+                **meta_ctx,
                 "features_n": int(X.shape[1]),
                 "filled_na": bool(self.fillna_value is not None),
                 "expected_schema_id": expected_schema_id,

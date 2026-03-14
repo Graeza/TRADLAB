@@ -32,7 +32,8 @@ from strategies.boom_spike_trend import BoomSpikeTrendStrategy
 from config.settings import (
     SYMBOL_LIST, TIMEFRAME_LIST, PRIMARY_TIMEFRAME, LOOP_SLEEP_SECONDS,
     DB_PATH, USE_ML_STRATEGY, ML_MODEL_PATH,
-    ENSEMBLE_MIN_CONF, ENSEMBLE_MIN_VOTE_GAP, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS, REGIME_WEIGHT_MULTIPLIERS,
+    ENSEMBLE_MIN_CONF, ENSEMBLE_MIN_VOTE_GAP, STRATEGY_WEIGHTS, LABEL_HORIZON_BARS, REGIME_WEIGHT_MULTIPLIERS, 
+    DATA_QUALITY_OUT_DIR,BACKTEST_STARTING_CASH, BACKTEST_WARMUP_BARS, BACKTEST_OUT_DIR
 )
 
 from risk_manager import RiskManager
@@ -389,11 +390,11 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_orders = QtWidgets.QFormLayout(grp_exec_orders)
 
         self.ex_force_fixed_lot = QtWidgets.QCheckBox("Minimum lot size")
-        self.ex_force_fixed_lot.setChecked(False)
+        self.ex_force_fixed_lot.setChecked(True)
         form_exec_orders.addRow(self.ex_force_fixed_lot)
 
         self.ex_fixed_sl_tp = QtWidgets.QCheckBox("Use SL/TP offset")
-        self.ex_fixed_sl_tp.setChecked(False)
+        self.ex_fixed_sl_tp.setChecked(True)
         form_exec_orders.addRow(self.ex_fixed_sl_tp)
 
         self.ex_sl_tp_offset = QtWidgets.QDoubleSpinBox()
@@ -408,14 +409,14 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_trailing = QtWidgets.QFormLayout(grp_exec_trailing)
 
         self.ex_enable_trailing = QtWidgets.QCheckBox("Enable trailing stop")
-        self.ex_enable_trailing.setChecked(False)
+        self.ex_enable_trailing.setChecked(True)
         form_exec_trailing.addRow(self.ex_enable_trailing)
 
         self.ex_trailing_trigger_rr = QtWidgets.QDoubleSpinBox()
         self.ex_trailing_trigger_rr.setDecimals(2)
         self.ex_trailing_trigger_rr.setRange(0.10, 20.00)
         self.ex_trailing_trigger_rr.setSingleStep(0.10)
-        self.ex_trailing_trigger_rr.setValue(1.00)
+        self.ex_trailing_trigger_rr.setValue(0.50)
         form_exec_trailing.addRow("Trail trigger (R)", self.ex_trailing_trigger_rr)
 
         self.ex_trailing_distance_rr = QtWidgets.QDoubleSpinBox()
@@ -461,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_filters.addRow("Session end hour", self.ex_session_end)
 
         self.ex_allow_weekends = QtWidgets.QCheckBox("Allow weekends")
-        self.ex_allow_weekends.setChecked(False)
+        self.ex_allow_weekends.setChecked(True)
         form_exec_filters.addRow(self.ex_allow_weekends)
 
         ex_left.addWidget(grp_exec_filters)
@@ -493,7 +494,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ex_block_symbols.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.MultiSelection
         )
-        self.ex_block_symbols.setMinimumHeight(120)
+        self.ex_block_symbols.setMinimumHeight(100)
 
         for sym in SYMBOL_LIST:
             item = QtWidgets.QListWidgetItem(str(sym))
@@ -507,12 +508,12 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_positions = QtWidgets.QFormLayout(grp_exec_positions)
 
         self.ex_single_pos_per_symbol = QtWidgets.QCheckBox("Only one open position per symbol")
-        self.ex_single_pos_per_symbol.setChecked(True)
+        self.ex_single_pos_per_symbol.setChecked(False)
         form_exec_positions.addRow(self.ex_single_pos_per_symbol)
 
         self.ex_max_pos_per_symbol = QtWidgets.QSpinBox()
         self.ex_max_pos_per_symbol.setRange(1, 100)
-        self.ex_max_pos_per_symbol.setValue(1)
+        self.ex_max_pos_per_symbol.setValue(2)
         form_exec_positions.addRow("Max positions per symbol", self.ex_max_pos_per_symbol)
 
         self.ex_max_total_positions = QtWidgets.QSpinBox()
@@ -522,7 +523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_positions.addRow("Max total open positions", self.ex_max_total_positions)
 
         self.ex_one_entry_per_bar = QtWidgets.QCheckBox("Only one entry per closed bar")
-        self.ex_one_entry_per_bar.setChecked(True)
+        self.ex_one_entry_per_bar.setChecked(False)
         form_exec_positions.addRow(self.ex_one_entry_per_bar)
 
         ex_right.addWidget(grp_exec_positions)
@@ -722,6 +723,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bt_symbol.addItems(SYMBOL_LIST)
         bt_form.addRow("Symbol", self.bt_symbol)
 
+        self.bt_selected_only = QtWidgets.QCheckBox("Selected symbol only")
+        self.bt_selected_only.setChecked(True)
+        bt_form.addRow("Scope", self.bt_selected_only)
+
         self.bt_tfs = QtWidgets.QLineEdit(",".join(str(t) for t in TIMEFRAME_LIST))
         bt_form.addRow("Timeframes (comma)", self.bt_tfs)
 
@@ -736,8 +741,18 @@ class MainWindow(QtWidgets.QMainWindow):
         bt_form.addRow("Start (YYYY-MM-DD, optional)", self.bt_start)
         bt_form.addRow("End (YYYY-MM-DD, optional)", self.bt_end)
 
+        bt_btn_row = QtWidgets.QHBoxLayout()
+
         self.btn_run_backtest = QtWidgets.QPushButton("Run Backtest (next open fills)")
-        bt_layout.addWidget(self.btn_run_backtest)
+        self.btn_audit_data_gaps = QtWidgets.QPushButton("Audit DB Gaps")
+        self.btn_backfill_data_gaps = QtWidgets.QPushButton("Backfill DB Gaps")
+
+        bt_btn_row.addWidget(self.btn_run_backtest)
+        bt_btn_row.addWidget(self.btn_audit_data_gaps)
+        bt_btn_row.addWidget(self.btn_backfill_data_gaps)
+        bt_btn_row.addStretch(1)
+
+        bt_layout.addLayout(bt_btn_row)
 
         self.lbl_bt_status = QtWidgets.QLabel("Backtest: —")
         self.lbl_bt_status.setStyleSheet("color: gray;")
@@ -915,6 +930,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_exp_refresh.clicked.connect(self.refresh_experiments)
         self.btn_exp_promote.clicked.connect(self.promote_selected_model)
         self.btn_run_backtest.clicked.connect(self.run_backtest)
+        self.btn_audit_data_gaps.clicked.connect(self.run_data_gap_audit)
+        self.btn_backfill_data_gaps.clicked.connect(self.run_backfill_data_gaps)
 
         # Risk/execution guard
         self.btn_apply_risk.clicked.connect(self.apply_risk_settings)
@@ -1010,6 +1027,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception:
             pass
+
     @QtCore.Slot()
     def close_positions_by_mode(self):
         try:
@@ -1038,6 +1056,82 @@ class MainWindow(QtWidgets.QMainWindow):
 
         except Exception as e:
             self.log.write(f"[CLOSE] Failed: {e}")
+
+    def _backtest_target_symbols(self) -> list[str]:
+        if self.bt_selected_only.isChecked():
+            sym = self.bt_symbol.currentText().strip()
+            return [sym] if sym else []
+        return list(SYMBOL_LIST)
+
+    def _set_backtest_buttons_enabled(self, enabled: bool) -> None:
+        self.btn_run_backtest.setEnabled(enabled)
+        if hasattr(self, "btn_audit_data_gaps"):
+            self.btn_audit_data_gaps.setEnabled(enabled)
+
+    def _run_next_backtest_job(self):
+        if not getattr(self, "_bt_queue", None):
+            ok_count = sum(1 for ok, _, _ in getattr(self, "_bt_results", []) if ok)
+            total = len(getattr(self, "_bt_results", []))
+            self._set_backtest_buttons_enabled(True)
+
+            if total == 0:
+                self.lbl_bt_status.setText("Backtest: nothing ran")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+            elif ok_count == total:
+                self.lbl_bt_status.setText(f"Backtest: completed for {ok_count}/{total} symbol(s)")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: green;")
+            else:
+                self.lbl_bt_status.setText(f"Backtest: completed with failures ({ok_count}/{total} OK)")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: orange;")
+
+            try:
+                self.refresh_experiments()
+            except Exception:
+                pass
+
+            self.bt_thread = None
+            self.bt_worker = None
+            return
+
+        symbol, cmd = self._bt_queue.pop(0)
+        self.lbl_bt_status.setText(f"Backtest: running {symbol} ({len(self._bt_results)+1}/{len(self._bt_results)+len(self._bt_queue)+1})")
+        self.lbl_bt_status.setStyleSheet("font-weight:600; color: gray;")
+        self.log.write("[BACKTEST] " + " ".join(cmd))
+
+        self.bt_thread = QtCore.QThread(self)
+        self.bt_worker = BacktestWorker(cmd)
+        self.bt_worker.moveToThread(self.bt_thread)
+
+        self.bt_worker.line.connect(self.log.write)
+        self.bt_thread.started.connect(self.bt_worker.run)
+
+        def _done(ok: bool, msg: str, _symbol=symbol):
+            self._bt_results.append((ok, _symbol, msg))
+            color = "green" if ok else "red"
+            self.lbl_bt_status.setText(f"Backtest: {_symbol} -> {msg}")
+            self.lbl_bt_status.setStyleSheet(f"font-weight:600; color: {color};")
+            self.bt_thread.quit()
+            self.bt_thread.wait(1500)
+            self._run_next_backtest_job()
+
+        self.bt_worker.finished.connect(_done)
+        self.bt_thread.start()
+
+    def _safe_fs_name(self, value: str) -> str:
+        out = []
+        for ch in str(value):
+            out.append(ch if ch.isalnum() else "_")
+        s = "".join(out)
+        while "__" in s:
+            s = s.replace("__", "_")
+        return s.strip("_")
+
+    def _set_backtest_buttons_enabled(self, enabled: bool) -> None:
+        self.btn_run_backtest.setEnabled(enabled)
+        if hasattr(self, "btn_audit_data_gaps"):
+            self.btn_audit_data_gaps.setEnabled(enabled)
+        if hasattr(self, "btn_backfill_data_gaps"):
+            self.btn_backfill_data_gaps.setEnabled(enabled)
 
     # ---------- Strategy building / hot updates ----------
     def _build_strategies(self, enabled: Optional[dict] = None):
@@ -1261,45 +1355,41 @@ class MainWindow(QtWidgets.QMainWindow):
     # ---------- Backtest ----------
     @QtCore.Slot()
     def run_backtest(self):
-        script = self._script_path("run_backtest.py")
-        if not os.path.exists(script):
-            self.lbl_bt_status.setText("Backtest: missing scripts/run_backtest.py (apply backtest patch)")
-            self.log.write("[BACKTEST] scripts/run_backtest.py not found")
+        if getattr(self, "bt_thread", None) is not None:
+            self.log.write("[BACKTEST] Backtest already running")
             return
 
-        symbol = self.bt_symbol.currentText()
-        tfs = [t.strip() for t in self.bt_tfs.text().split(",") if t.strip()]
+        symbols = self._backtest_target_symbols()
+        if not symbols:
+            self.lbl_bt_status.setText("Backtest: no symbol selected")
+            self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+            return
+
+        tfs = [x.strip() for x in self.bt_tfs.text().split(",") if x.strip()]
+        if not tfs:
+            self.lbl_bt_status.setText("Backtest: no timeframes specified")
+            self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+            return
+
         primary_tf = str(self.bt_primary_tf.currentData())
 
-        blocked_symbols = []
-        try:
-            blocked_symbols = [item.text().strip() for item in self.ex_block_symbols.selectedItems() if item.text().strip()]
-        except Exception:
-            blocked_symbols = []
-
-        cmd = [sys.executable, script, "--symbol", symbol, "--primary-tf", primary_tf]
-        if tfs:
-            cmd += ["--tfs"] + tfs
-        if self.bt_start.text().strip():
-            cmd += ["--start", self.bt_start.text().strip()]
-        if self.bt_end.text().strip():
-            cmd += ["--end", self.bt_end.text().strip()]
-
-        # Strategy settings
-        cmd += [
-            "--use-rsi", str(self.chk_use_rsi.isChecked()).lower(),
-            "--use-breakout", str(self.chk_use_breakout.isChecked()).lower(),
-            "--use-ml", str(self.chk_use_ml.isChecked()).lower(),
-            "--use-boom", str(self.chk_use_boom.isChecked()).lower(),
+        base_cmd_common = [
+            sys.executable,
+            self._script_path("run_backtest.py"),
+            "--primary-tf", primary_tf,
+            "--tfs", *tfs,
+            "--cash", str(BACKTEST_STARTING_CASH),
+            "--warmup", str(BACKTEST_WARMUP_BARS),
+            "--ensemble-min-conf", str(float(self.spin_min_conf.value())),
+            "--min-vote-gap", str(float(self.spin_min_vote_gap.value())),
+            "--use-rsi", str(self.chk_rsi.isChecked()),
+            "--use-breakout", str(self.chk_breakout.isChecked()),
+            "--use-ml", str(self.chk_ml.isChecked()),
+            "--use-boom", str(self.chk_boom.isChecked()),
             "--weight-rsi", str(float(self.w_rsi.value())),
             "--weight-breakout", str(float(self.w_breakout.value())),
             "--weight-ml", str(float(self.w_ml.value())),
             "--weight-boom", str(float(self.w_boom.value())),
-            "--ensemble-min-conf", str(float(self.spin_min_conf.value())),
-        ]
-
-        # Risk settings
-        cmd += [
             "--risk-max-pct", str(float(self.risk_max_risk_pct.value())),
             "--risk-min-conf", str(float(self.risk_min_conf.value())),
             "--risk-sl-atr", str(float(self.risk_sl_atr.value())),
@@ -1307,51 +1397,160 @@ class MainWindow(QtWidgets.QMainWindow):
             "--risk-fallback-sl", str(float(self.risk_fallback_sl.value())),
             "--risk-max-spread", str(int(self.risk_max_spread.value())),
             "--risk-base-dev", str(int(self.risk_base_dev.value())),
-        ]
-
-        # Execution guard settings
-        cmd += [
-            "--allow-new-trades", str(self.chk_allow.isChecked()).lower(),
-            "--blocked-symbols", ",".join(blocked_symbols),
-            "--enable-session-filter", str(self.ex_enable_session.isChecked()).lower(),
+            "--allow-new-trades", str(self.chk_allow.isChecked()),
+            "--blocked-symbols", ",".join(self._blocked_symbols_set()),
+            "--enable-session-filter", str(self.ex_enable_session.isChecked()),
             "--session-start-hour", str(int(self.ex_session_start.value())),
             "--session-end-hour", str(int(self.ex_session_end.value())),
-            "--allow-weekends", str(self.ex_allow_weekends.isChecked()).lower(),
-            "--enable-spread-filter", str(self.ex_enable_spread.isChecked()).lower(),
+            "--allow-weekends", str(self.ex_allow_weekends.isChecked()),
+            "--enable-spread-filter", str(self.ex_enable_spread.isChecked()),
             "--exec-max-spread", str(int(self.ex_max_spread.value())),
-            "--force-fixed-lot", str(self.ex_force_fixed_lot.isChecked()).lower(),
-            "--fixed-sl-tp", str(self.ex_fixed_sl_tp.isChecked()).lower(),
+            "--force-fixed-lot", str(self.ex_force_fixed_lot.isChecked()),
+            "--fixed-sl-tp", str(self.ex_fixed_sl_tp.isChecked()),
             "--sl-tp-offset", str(float(self.ex_sl_tp_offset.value())),
-            "--enable-trailing-stop", str(self.ex_enable_trailing.isChecked()).lower(),
+            "--enable-trailing-stop", str(self.ex_enable_trailing.isChecked()),
             "--trailing-trigger-rr", str(float(self.ex_trailing_trigger_rr.value())),
             "--trailing-distance-rr", str(float(self.ex_trailing_distance_rr.value())),
             "--trailing-step-rr", str(float(self.ex_trailing_step_rr.value())),
-            "--max-retries", str(int(self.ex_max_retries.value())),
-            "--retry-delay-ms", str(int(self.ex_retry_delay.value())),
         ]
 
-        self.lbl_bt_status.setText("Backtest: running…")
+        if self.bt_start.text().strip():
+            base_cmd_common += ["--start", self.bt_start.text().strip()]
+        if self.bt_end.text().strip():
+            base_cmd_common += ["--end", self.bt_end.text().strip()]
+
+        self._bt_queue = []
+        for symbol in symbols:
+            out_dir = os.path.abspath(os.path.join(BACKTEST_OUT_DIR, self._safe_fs_name(symbol)))
+            cmd = list(base_cmd_common) + [
+                "--symbol", symbol,
+                "--out", out_dir,
+                "--tag", f"next_open_{self._safe_fs_name(symbol)}",
+            ]
+            self._bt_queue.append((symbol, cmd))
+
+        self._bt_results = []
+        self._set_backtest_buttons_enabled(False)
+        self._run_next_backtest_job()
+
+    @QtCore.Slot()
+    def run_data_gap_audit(self):
+        if getattr(self, "bt_thread", None) is not None:
+            self.log.write("[AUDIT] Another backtest/audit job is already running")
+            return
+
+        symbols = self._backtest_target_symbols()
+        tfs = [x.strip() for x in self.bt_tfs.text().split(",") if x.strip()]
+        out_dir = os.path.abspath(DATA_QUALITY_OUT_DIR)
+
+        cmd = [
+            sys.executable,
+            self._script_path("audit_data_gaps.py"),
+            "--db", str(DB_PATH),
+            "--out", out_dir,
+        ]
+
+        if symbols:
+            cmd += ["--symbols", *symbols]
+
+        if tfs:
+            cmd += ["--timeframes", *tfs]
+
+        if self.bt_start.text().strip():
+            cmd += ["--start", self.bt_start.text().strip()]
+        if self.bt_end.text().strip():
+            cmd += ["--end", self.bt_end.text().strip()]
+
+        self.lbl_bt_status.setText("Backtest: running data-gap audit…")
         self.lbl_bt_status.setStyleSheet("font-weight:600; color: gray;")
-        self.btn_run_backtest.setEnabled(False)
+        self._set_backtest_buttons_enabled(False)
 
         self.bt_thread = QtCore.QThread(self)
         self.bt_worker = BacktestWorker(cmd)
         self.bt_worker.moveToThread(self.bt_thread)
+
+        self.bt_worker.line.connect(self.log.write)
+        self.bt_thread.started.connect(self.bt_worker.run)
+
+        def _done(ok: bool, msg: str):
+            self._set_backtest_buttons_enabled(True)
+            if ok:
+                self.lbl_bt_status.setText(f"Backtest: data-gap audit completed ({out_dir})")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: green;")
+            else:
+                self.lbl_bt_status.setText(f"Backtest: data-gap audit failed ({msg})")
+                self.lbl_bt_status.setStyleSheet("font-weight:600; color: red;")
+            self.bt_thread.quit()
+            self.bt_thread.wait(1500)
+            self.bt_thread = None
+            self.bt_worker = None
+
+        self.bt_worker.finished.connect(_done)
+        self.bt_thread.start()
+
+    @QtCore.Slot(bool, str)
+    def _on_data_gap_audit_finished(self, ok: bool, message: str):
+        self.btn_run_backtest.setEnabled(True)
+        self.btn_audit_data_gaps.setEnabled(True)
+
+        if ok:
+            out_dir = os.path.abspath(DATA_QUALITY_OUT_DIR)
+            self.lbl_bt_status.setText(f"Backtest: data-gap audit completed ({out_dir})")
+            self.lbl_bt_status.setStyleSheet("font-weight:600; color: #1f7a1f;")
+            self.log.write(f"[AUDIT] Completed. Outputs saved to: {out_dir}")
+        else:
+            self.lbl_bt_status.setText(f"Backtest: data-gap audit failed ({message})")
+            self.lbl_bt_status.setStyleSheet("font-weight:600; color: #b00020;")
+            self.log.write(f"[AUDIT] Failed: {message}")
+
+    @QtCore.Slot()
+    def run_backfill_data_gaps(self):
+        if getattr(self, "bt_thread", None) is not None:
+            self.log.write("[BACKFILL] Another backtest/audit/backfill job is already running")
+            return
+
+        symbols = self._backtest_target_symbols() if hasattr(self, "_backtest_target_symbols") else [self.bt_symbol.currentText().strip()]
+        tfs = [x.strip() for x in self.bt_tfs.text().split(",") if x.strip()]
+
+        cmd = [
+            sys.executable,
+            self._script_path("backfill_data_gaps.py"),
+            "--db", str(DB_PATH),
+            "--audit-dir", os.path.abspath(DATA_QUALITY_OUT_DIR),
+            "--rerun-audit",
+        ]
+
+        if symbols:
+            cmd += ["--symbols", *symbols]
+        if tfs:
+            cmd += ["--timeframes", *tfs]
+
+        self.lbl_bt_status.setText("Backtest: backfilling DB gaps…")
+        self.lbl_bt_status.setStyleSheet("font-weight:600; color: gray;")
+        self._set_backtest_buttons_enabled(False)
+
+        self.bt_thread = QtCore.QThread(self)
+        self.bt_worker = BacktestWorker(cmd)
+        self.bt_worker.moveToThread(self.bt_thread)
+
         self.bt_thread.started.connect(self.bt_worker.run)
         self.bt_worker.line.connect(self._append_log)
 
         def _done(ok: bool, msg: str):
-            self.btn_run_backtest.setEnabled(True)
-            self.lbl_bt_status.setText(f"Backtest: {msg}")
+            self._set_backtest_buttons_enabled(True)
+            self.lbl_bt_status.setText(
+                f"Backtest: {'backfill completed' if ok else 'backfill failed'} — {msg}"
+            )
             self.lbl_bt_status.setStyleSheet(
                 "font-weight:600; color: green;" if ok else "font-weight:600; color: red;"
             )
+
             try:
-                self.refresh_experiments()
-            except Exception:
-                pass
-            self.bt_thread.quit()
-            self.bt_thread.wait(1500)
+                self.bt_thread.quit()
+                self.bt_thread.wait(1500)
+            finally:
+                self.bt_thread = None
+                self.bt_worker = None
 
         self.bt_worker.finished.connect(_done)
         self.bt_thread.start()

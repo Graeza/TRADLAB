@@ -113,7 +113,7 @@ class Orchestrator:
         try:
             if primary_df is None or len(primary_df.index) == 0:
                 return None
-            idx = primary_df.index[-2] if len(primary_df.index) >= 2 else primary_df.index[-1]
+            idx = primary_df.index[-1]
             if hasattr(idx, "to_pydatetime"):
                 idx = idx.to_pydatetime()
             if isinstance(idx, datetime):
