@@ -359,6 +359,7 @@ def main() -> None:
         out_dir=args.out,
         equity_curve=res.equity_curve,
         fills=res.fills,
+        strategy_outputs=res.strategy_outputs,
         metrics=res.metrics,
         extra=extra,
     )

@@ -178,6 +178,23 @@ class MLStrategy(Strategy):
             if c in df.columns:
                 return c
         return None
+    
+    def _resolve_h1_df(self, data_by_tf: Dict[int, pd.DataFrame]) -> Optional[pd.DataFrame]:
+        h1_df = data_by_tf.get(self.h1_tf)
+        if h1_df is not None and not h1_df.empty:
+            return h1_df
+
+        # Accept both minute-based key (60) and MT5 H1 constant (16385).
+        if int(self.h1_tf) == 60:
+            alt = data_by_tf.get(16385)
+            if alt is not None and not alt.empty:
+                return alt
+        elif int(self.h1_tf) == 16385:
+            alt = data_by_tf.get(60)
+            if alt is not None and not alt.empty:
+                return alt
+        return None
+
     def _evaluate(self, data_by_tf: Dict[int, pd.DataFrame], context: Optional[Dict[str, Any]] = None):
         df = next(iter(data_by_tf.values()))
         if df is None or df.empty:
@@ -225,7 +242,7 @@ class MLStrategy(Strategy):
         # Keep a separate debug/context copy so we do NOT mutate the inference schema.
         debug_df = df
         if self.use_h1_meta:
-            h1_df = data_by_tf.get(self.h1_tf)
+            h1_df = self._resolve_h1_df(data_by_tf)
             if h1_df is not None and not h1_df.empty:
                 try:
                     debug_df = add_h1_context_to_df(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Optional
+import json
 
 import pandas as pd
 
@@ -17,6 +18,7 @@ from core.ensemble import EnsembleEngine
 class BacktestResult:
     equity_curve: pd.DataFrame
     fills: pd.DataFrame
+    strategy_outputs: pd.DataFrame
     metrics: BacktestMetrics
 
 
@@ -64,6 +66,8 @@ def run_backtest_next_open(
     end_i = n - 2
     if end_i <= start_i:
         raise ValueError("Not enough bars for backtest after warmup")
+    
+    strategy_output_rows: list[dict] = []
 
     for i in range(start_i, end_i + 1):
         t = int(primary_bars.loc[i, "time"])
@@ -83,6 +87,20 @@ def run_backtest_next_open(
         final_signal, outputs = ensemble.run(data_by_tf, regime=regime)
         if isinstance(final_signal, dict):
             final_signal["regime"] = regime
+
+        for out in outputs:
+            strategy_output_rows.append({
+                "time_s": int(t),
+                "symbol": str(symbol),
+                "strategy": str(out.get("name", "")),
+                "signal": str(out.get("signal", "HOLD")),
+                "confidence": float(out.get("confidence", 0.0) or 0.0),
+                "meta_json": json.dumps(out.get("meta", {}) or {}, ensure_ascii=False),
+                "final_signal": str(final_signal.get("signal", "HOLD")),
+                "final_confidence": float(final_signal.get("confidence", 0.0) or 0.0),
+                "regime_trend": str(regime.get("trend", "UNKNOWN")),
+                "regime_vol": str(regime.get("vol", "UNKNOWN")),
+            })
 
         params = risk.assess(
             signal=final_signal,
@@ -110,5 +128,11 @@ def run_backtest_next_open(
 
     equity_curve = pd.DataFrame(broker.equity_curve)
     fills = pd.DataFrame([f.__dict__ for f in broker.fills])
+    strategy_outputs = pd.DataFrame(strategy_output_rows)
     metrics = compute_metrics(equity_curve, fills)
-    return BacktestResult(equity_curve=equity_curve, fills=fills, metrics=metrics)
+    return BacktestResult(
+        equity_curve=equity_curve,
+        fills=fills,
+        strategy_outputs=strategy_outputs,
+        metrics=metrics,
+    )

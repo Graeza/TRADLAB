@@ -17,6 +17,7 @@ def save_backtest_outputs(
     out_dir: str,
     equity_curve: pd.DataFrame,
     fills: pd.DataFrame,
+    strategy_outputs: pd.DataFrame,
     metrics: BacktestMetrics,
     extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
@@ -25,16 +26,19 @@ def save_backtest_outputs(
 
     eq_path = os.path.join(out_dir, "equity_curve.csv")
     fills_path = os.path.join(out_dir, "fills.csv")
+    strategy_outputs_path = os.path.join(out_dir, "strategy_outputs.csv")
     metrics_path = os.path.join(out_dir, "metrics.json")
 
     equity_curve.to_csv(eq_path, index=False)
     fills.to_csv(fills_path, index=False)
+    strategy_outputs.to_csv(strategy_outputs_path, index=False)
     with open(metrics_path, "w", encoding="utf-8") as f:
         payload = {"metrics": asdict(metrics), "extra": extra or {}}
         json.dump(payload, f, indent=2)
 
     paths["equity_curve"] = eq_path
     paths["fills"] = fills_path
+    paths["strategy_outputs"] = strategy_outputs_path
     paths["metrics"] = metrics_path
     return paths
 
