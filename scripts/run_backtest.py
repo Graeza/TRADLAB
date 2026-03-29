@@ -56,6 +56,7 @@ from strategies.rsi_ema import RSIEMAStrategy
 from strategies.breakout import BreakoutStrategy
 from strategies.ml_strategy import MLStrategy
 from strategies.boom_spike_trend import BoomSpikeTrendStrategy
+from strategies.boom_sell_decay import BoomSellDecayStrategy
 
 from backtest.data_source import load_bars_from_db
 from backtest.broker import SimBroker
@@ -100,16 +101,22 @@ def build_strategies(
     use_breakout: bool = True,
     use_ml: bool = USE_ML_STRATEGY,
     use_boom: bool = True,
+    use_boom_sell: bool = True,
     ml_model_path: str | None = None,
 ):
     strategies = []
 
     if use_rsi:
         strategies.append(RSIEMAStrategy())
+
     if use_breakout:
         strategies.append(BreakoutStrategy())
+
     if use_boom:
         strategies.append(BoomSpikeTrendStrategy())
+
+    if use_boom_sell:
+        strategies.append(BoomSellDecayStrategy())
 
     chosen_ml_path = str(ml_model_path or "").strip() or None
 
@@ -157,6 +164,8 @@ def main() -> None:
     ap.add_argument("--weight-ml", type=float, default=float(STRATEGY_WEIGHTS.get("ML", 1.0)))
     ap.add_argument("--weight-boom", type=float, default=float(STRATEGY_WEIGHTS.get("BOOM_SPIKE_TREND", 1.0)))
     ap.add_argument("--ensemble-min-conf", type=float, default=float(ENSEMBLE_MIN_CONF))
+    ap.add_argument("--use-boom-sell", type=_parse_bool, default=True)
+    ap.add_argument("--weight-boom-sell", type=float, default=1.45)
 
     # Risk controls from GUI
     ap.add_argument("--risk-max-pct", type=float, default=1.0)
@@ -229,6 +238,7 @@ def main() -> None:
         use_breakout=bool(args.use_breakout),
         use_ml=bool(args.use_ml),
         use_boom=bool(args.use_boom),
+        use_boom_sell=bool(args.use_boom_sell),
         ml_model_path=args.ml_model_path,
     )
     if not strategies:
@@ -241,6 +251,7 @@ def main() -> None:
             "BREAKOUT": float(args.weight_breakout),
             "ML": float(args.weight_ml),
             "BOOM_SPIKE_TREND": float(args.weight_boom),
+            "BOOM_SELL_DECAY": float(args.weight_boom_sell),
         },
         min_conf=float(args.ensemble_min_conf),
         min_vote_gap=max(0.0, min(1.0, float(args.min_vote_gap))),
@@ -298,11 +309,13 @@ def main() -> None:
             "use_breakout": bool(args.use_breakout),
             "use_ml": bool(args.use_ml),
             "use_boom": bool(args.use_boom),
+            "use_boom_sell": bool(args.use_boom_sell),
             "weights": {
                 "RSI_EMA": float(args.weight_rsi),
                 "BREAKOUT": float(args.weight_breakout),
                 "ML": float(args.weight_ml),
                 "BOOM_SPIKE_TREND": float(args.weight_boom),
+                "BOOM_SELL_DECAY": float(args.weight_boom_sell),
             },
             "ensemble_min_conf": float(args.ensemble_min_conf),
             "ensemble_min_vote_gap": float(args.min_vote_gap),

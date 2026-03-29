@@ -456,14 +456,26 @@ class TradeExecutor:
                     f"new_sl={new_sl} risk={meta.get('initial_risk')} "
                     f"profit_dist={meta.get('profit_dist')}"
                 )
-                result = self._modify_position_sl_tp(position_id=position_id, symbol=symbol, sl=new_sl, tp=tp)
+
+                result = self._modify_position_sl_tp(
+                    position_id=position_id,
+                    symbol=symbol,
+                    sl=new_sl,
+                    tp=tp,
+                )
+
+                retcode = int(getattr(result, "retcode", -1) or -1) if result is not None else -1
+
                 print(
                     f"[TRAIL DEBUG] modify symbol={symbol} pos={position_id} "
                     f"retcode={retcode} comment={getattr(result, 'comment', '')}"
                 )
 
-                retcode = int(getattr(result, "retcode", -1) or -1) if result is not None else -1
-                ok = result is not None and retcode in {int(mt5.TRADE_RETCODE_DONE), int(mt5.TRADE_RETCODE_DONE_PARTIAL), int(mt5.TRADE_RETCODE_PLACED)}
+                ok = result is not None and retcode in {
+                    int(mt5.TRADE_RETCODE_DONE),
+                    int(mt5.TRADE_RETCODE_DONE_PARTIAL),
+                    int(mt5.TRADE_RETCODE_PLACED),
+                }
 
                 event = {
                     "ok": ok,
@@ -592,6 +604,52 @@ class TradeExecutor:
             if profit < 0 and self._close_position_obj(p):
                 count += 1
         return count
+
+    def auto_close_profitable_boom_buys(self, min_profit: float = 0.0) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        threshold = float(min_profit or 0.0)
+
+        for p in self._managed_positions():
+            try:
+                symbol = str(getattr(p, "symbol", "") or "")
+                if "boom" not in symbol.lower():
+                    continue
+
+                side = self._position_side(p)
+                if side != "BUY":
+                    continue
+
+                profit = float(getattr(p, "profit", 0.0) or 0.0)
+                if profit <= threshold:
+                    continue
+
+                position_id = int(getattr(p, "ticket", 0) or 0)
+                ok = self._close_position_obj(p)
+
+                events.append({
+                    "ok": bool(ok),
+                    "event_type": "AUTO_CLOSE_PROFITABLE_BOOM_BUY",
+                    "position_id": position_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "profit": profit,
+                    "event_time": datetime.now(timezone.utc),
+                    "reason": None if ok else "close_failed",
+                })
+            except Exception as e:
+                events.append({
+                    "ok": False,
+                    "event_type": "AUTO_CLOSE_PROFITABLE_BOOM_BUY",
+                    "position_id": int(getattr(p, "ticket", 0) or 0),
+                    "symbol": str(getattr(p, "symbol", "") or ""),
+                    "side": self._position_side(p) if p is not None else "UNKNOWN",
+                    "profit": float(getattr(p, "profit", 0.0) or 0.0) if p is not None else 0.0,
+                    "event_time": datetime.now(timezone.utc),
+                    "reason": "exception",
+                    "error": str(e),
+                })
+
+        return events
 
     def execute(self, params: dict[str, Any]) -> dict[str, Any]:
         symbol = str(params["symbol"])

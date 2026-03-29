@@ -29,6 +29,7 @@ from strategies.rsi_ema import RSIEMAStrategy
 from strategies.breakout import BreakoutStrategy
 from strategies.ml_strategy import MLStrategy
 from strategies.boom_spike_trend import BoomSpikeTrendStrategy
+from strategies.boom_sell_decay import BoomSellDecayStrategy
 
 from config.settings import (
     SYMBOL_LIST, TIMEFRAME_LIST, PRIMARY_TIMEFRAME, LOOP_SLEEP_SECONDS,
@@ -265,17 +266,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.chk_use_rsi = QtWidgets.QCheckBox("Enable RSI/EMA strategy")
         self.chk_use_rsi.setChecked(True)
+
         self.chk_use_breakout = QtWidgets.QCheckBox("Enable Breakout strategy")
         self.chk_use_breakout.setChecked(True)
+
         self.chk_use_ml = QtWidgets.QCheckBox("Enable ML strategy")
         self.chk_use_ml.setChecked(bool(USE_ML_STRATEGY))
+
         self.chk_use_boom = QtWidgets.QCheckBox("Enable Boom Spike/Trend strategy")
         self.chk_use_boom.setChecked(True)
+
+        self.chk_use_boom_sell = QtWidgets.QCheckBox("Enable Boom Sell Decay strategy")
+        self.chk_use_boom_sell.setChecked(True)
 
         strat_layout.addWidget(self.chk_use_rsi)
         strat_layout.addWidget(self.chk_use_breakout)
         strat_layout.addWidget(self.chk_use_ml)
         strat_layout.addWidget(self.chk_use_boom)
+        strat_layout.addWidget(self.chk_use_boom_sell)
 
         wgrp = QtWidgets.QGroupBox("Strategy Weights (base)")
         wform = QtWidgets.QFormLayout(wgrp)
@@ -300,10 +308,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.w_boom.setSingleStep(0.1)
         self.w_boom.setValue(float(STRATEGY_WEIGHTS.get("BOOM_SPIKE_TREND", 1.3)))
 
+        self.w_boom_sell = QtWidgets.QDoubleSpinBox()
+        self.w_boom_sell.setRange(0.0, 100.0)
+        self.w_boom_sell.setSingleStep(0.1)
+        self.w_boom_sell.setValue(float(STRATEGY_WEIGHTS.get("BOOM_SELL_DECAY", 1.45)))
+
         wform.addRow("RSI/EMA", self.w_rsi)
         wform.addRow("Breakout", self.w_breakout)
         wform.addRow("ML", self.w_ml)
         wform.addRow("Boom Spike/Trend", self.w_boom)
+        wform.addRow("Boom Sell Decay", self.w_boom_sell)
         strat_layout.addWidget(wgrp)
 
         self.spin_min_conf = QtWidgets.QDoubleSpinBox()
@@ -526,6 +540,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ex_one_entry_per_bar = QtWidgets.QCheckBox("Only one entry per closed bar")
         self.ex_one_entry_per_bar.setChecked(False)
         form_exec_positions.addRow(self.ex_one_entry_per_bar)
+
+        self.ex_auto_close_boom_buy_profit = QtWidgets.QCheckBox(
+            "Auto-close profitable Boom BUY trades"
+        )
+        self.ex_auto_close_boom_buy_profit.setChecked(False)
+        form_exec_positions.addRow(self.ex_auto_close_boom_buy_profit)
+
+        self.ex_auto_close_boom_buy_profit_threshold = QtWidgets.QDoubleSpinBox()
+        self.ex_auto_close_boom_buy_profit_threshold.setDecimals(2)
+        self.ex_auto_close_boom_buy_profit_threshold.setRange(0.0, 1_000_000.0)
+        self.ex_auto_close_boom_buy_profit_threshold.setValue(0.0)
+        form_exec_positions.addRow(
+            "Min profit to auto-close",
+            self.ex_auto_close_boom_buy_profit_threshold,
+        )
 
         ex_right.addWidget(grp_exec_positions)
 
@@ -923,6 +952,8 @@ class MainWindow(QtWidgets.QMainWindow):
             enable_max_daily_trades=bool(self.ex_enable_daily_limits.isChecked()),
             max_daily_trades_per_symbol=int(self.ex_daily_trades_per_symbol.value()),
             max_daily_trades_total=int(self.ex_daily_trades_total.value()),
+            auto_close_profitable_boom_buys=bool(self.ex_auto_close_boom_buy_profit.isChecked()),
+            auto_close_profit_threshold=float(self.ex_auto_close_boom_buy_profit_threshold.value()) if hasattr(self, "ex_auto_close_boom_buy_profit_threshold") else 0.0,
         )
 
         self.chk_allow.stateChanged.connect(lambda _: self.log.write(f"[UI] Allow New Trades = {self.chk_allow.isChecked()}"))
@@ -1240,15 +1271,22 @@ class MainWindow(QtWidgets.QMainWindow):
             "BreakoutStrategy": True,
             "MLStrategy": bool(USE_ML_STRATEGY),
             "BoomSpikeTrendStrategy": True,
+            "BoomSellDecayStrategy": True,
         }
 
         strategies = []
+
         if enabled.get("RSIEMAStrategy", True):
             strategies.append(RSIEMAStrategy())
+
         if enabled.get("BreakoutStrategy", True):
             strategies.append(BreakoutStrategy())
+
         if enabled.get("BoomSpikeTrendStrategy", True):
             strategies.append(BoomSpikeTrendStrategy())
+
+        if enabled.get("BoomSellDecayStrategy", True):
+            strategies.append(BoomSellDecayStrategy())
 
         if enabled.get("MLStrategy", True) and USE_ML_STRATEGY:
             try:
@@ -1281,6 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "BreakoutStrategy": self.chk_use_breakout.isChecked(),
             "MLStrategy": self.chk_use_ml.isChecked(),
             "BoomSpikeTrendStrategy": self.chk_use_boom.isChecked(),
+            "BoomSellDecayStrategy": self.chk_use_boom_sell.isChecked(),
         }
 
         strategies = self._build_strategies(enabled=enabled)
@@ -1292,6 +1331,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "BREAKOUT": float(self.w_breakout.value()),
             "ML": float(self.w_ml.value()),
             "BOOM_SPIKE_TREND": float(self.w_boom.value()),
+            "BOOM_SELL_DECAY": float(self.w_boom_sell.value()),
         }
         self.ensemble.min_conf = float(self.spin_min_conf.value())
         self.ensemble.min_vote_gap = float(self.spin_min_vote_gap.value())
@@ -1512,10 +1552,12 @@ class MainWindow(QtWidgets.QMainWindow):
             "--use-breakout", str(self.chk_use_breakout.isChecked()),
             "--use-ml", str(self.chk_use_ml.isChecked()),
             "--use-boom", str(self.chk_use_boom.isChecked()),
+            "--use-boom-sell", str(self.chk_use_boom_sell.isChecked()),
             "--weight-rsi", str(float(self.w_rsi.value())),
             "--weight-breakout", str(float(self.w_breakout.value())),
             "--weight-ml", str(float(self.w_ml.value())),
             "--weight-boom", str(float(self.w_boom.value())),
+            "--weight-boom-sell", str(float(self.w_boom_sell.value())),
             "--risk-max-pct", str(float(self.risk_max_risk_pct.value())),
             "--risk-min-conf", str(float(self.risk_min_conf.value())),
             "--risk-sl-atr", str(float(self.risk_sl_atr.value())),
@@ -1996,6 +2038,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     enable_max_daily_trades=bool(self.ex_enable_daily_limits.isChecked()),
                     max_daily_trades_per_symbol=int(self.ex_daily_trades_per_symbol.value()),
                     max_daily_trades_total=int(self.ex_daily_trades_total.value()),
+                    auto_close_profitable_boom_buys=bool(
+                        self.ex_auto_close_boom_buy_profit.isChecked()
+                    ),
+                    auto_close_profit_threshold=float(
+                        self.ex_auto_close_boom_buy_profit_threshold.value()
+                    ) if hasattr(self, "ex_auto_close_boom_buy_profit_threshold") else 0.0,
                 )
 
             fixed = "ON" if self.executor.force_symbol_fixed_lot else "OFF"
@@ -2016,7 +2064,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "fixed_lot={fixed}\n"
                 "fixed_sl_tp={fixed_sl_tp} (offset {offset:g})\n"
                 "trailing={trailing} (trigger {trigger:.2f}R, distance {distance:.2f}R, step {step:.2f}R)\n"
-                "blocked_symbols={blocked}"
+                "blocked_symbols={blocked}\n"
+                f"auto_close_boom_buy_profit={self.ex_auto_close_boom_buy_profit.isChecked()})"
                 .format(
                     spread=spread,
                     max_spread=self.executor.max_spread_points,

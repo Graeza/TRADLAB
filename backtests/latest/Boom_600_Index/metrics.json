@@ -1,13 +1,13 @@
 {
   "metrics": {
     "start_equity": 10000.0,
-    "end_equity": 9933.0352,
-    "total_return": -0.006696480000000005,
-    "max_drawdown": -0.007400344793539336,
-    "n_trades": 349,
-    "win_rate": 0.5959885386819485,
-    "avg_trade_pnl": -0.19187621776503908,
-    "profit_factor": 0.7625361702127702
+    "end_equity": 9987.911200000006,
+    "total_return": -0.0012088799999994126,
+    "max_drawdown": -0.008563398751407037,
+    "n_trades": 693,
+    "win_rate": 0.6219336219336219,
+    "avg_trade_pnl": -0.017444155844153784,
+    "profit_factor": 0.976929770992369
   },
   "extra": {
     "symbol": "Boom 600 Index",
@@ -25,11 +25,13 @@
       "use_breakout": true,
       "use_ml": true,
       "use_boom": true,
+      "use_boom_sell": true,
       "weights": {
         "RSI_EMA": 1.0,
         "BREAKOUT": 1.0,
         "ML": 1.2,
-        "BOOM_SPIKE_TREND": 1.3
+        "BOOM_SPIKE_TREND": 1.3,
+        "BOOM_SELL_DECAY": 1.45
       },
       "ensemble_min_conf": 0.55,
       "ensemble_min_vote_gap": 0.1

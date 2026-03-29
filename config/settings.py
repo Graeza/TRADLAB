@@ -54,6 +54,7 @@ STRATEGY_WEIGHTS = {
     "BREAKOUT": 1.0,
     "ML": 1.2,
     "BOOM_SPIKE_TREND": 1.3,
+    "BOOM_SELL_DECAY": 1.45,
 }
 
 # --- Labeling ---
@@ -76,12 +77,14 @@ REGIME_WEIGHT_MULTIPLIERS = {
         "BREAKOUT": 1.3,
         "ML": 1.0,
         "BOOM_SPIKE_TREND": 1.05,
+        "BOOM_SELL_DECAY": 1.10,
     },
     "RANGE": {
         "RSI_EMA": 1.3,
         "BREAKOUT": 0.7,
         "ML": 1.0,
         "BOOM_SPIKE_TREND": 1.10,
+        "BOOM_SELL_DECAY": 0.90,
     },
 
     # Volatility
@@ -90,11 +93,13 @@ REGIME_WEIGHT_MULTIPLIERS = {
         "BREAKOUT": 1.1,
         "ML": 1.0,
         "BOOM_SPIKE_TREND": 0.85,
+        "BOOM_SELL_DECAY": 1.15,
     },
     "LOW_VOL": {
         "RSI_EMA": 1.1,
         "BREAKOUT": 0.9,
         "ML": 1.0,
         "BOOM_SPIKE_TREND": 1.25,
+        "BOOM_SELL_DECAY": 1.05,
     },
 }

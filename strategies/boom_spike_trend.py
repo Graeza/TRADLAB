@@ -170,6 +170,7 @@ class BoomSpikeTrendStrategy(Strategy):
         h4_ema50 = h4_close.ewm(span=50, adjust=False).mean().iloc[-1]
         h4_last = float(h4_close.iloc[-1])
         trend_up_h4 = h4_last >= float(h4_ema50)
+        trend_down_h4 = h4_last <= float(h4_ema50)
 
         last_m15 = m15.iloc[-1]
         h1_trend = str(last_m15.get("h1_trend", "neutral")).lower()
@@ -189,9 +190,18 @@ class BoomSpikeTrendStrategy(Strategy):
 
         ex_ok, ex_meta = _wick_exhaustion(last_m15, wick_to_body=self.wick_to_body)
 
+        # rsi = float(last_m15.get("RSI", 50.0))
+        # rsi_ok_for_sell = rsi >= 55.0
+        # rsi_ok_for_buy = rsi <= 55.0
+
         rsi = float(last_m15.get("RSI", 50.0))
-        rsi_ok_for_sell = rsi >= 55.0
-        rsi_ok_for_buy = rsi <= 55.0
+
+        # reversal / exhaustion sell gate
+        rsi_ok_for_spike_sell = rsi >= 55.0
+
+        # continuation gates
+        rsi_ok_for_trend_buy = rsi <= 60.0
+        rsi_ok_for_trend_sell = rsi >= 40.0
 
         compression = bb_compress and atr_compress
 
@@ -229,7 +239,7 @@ class BoomSpikeTrendStrategy(Strategy):
             **ex_meta,
         }
 
-        if compression and ex_ok and impulse_down and rsi_ok_for_sell:
+        if compression and ex_ok and impulse_down and rsi_ok_for_spike_sell:
             if self.use_h1_filter:
                 sell_allowed = (h1_trend == "bearish") or (self.allow_neutral_h1 and h1_trend == "neutral")
                 if not sell_allowed:
@@ -246,7 +256,7 @@ class BoomSpikeTrendStrategy(Strategy):
             meta["mode"] = "spike_sell"
             return StrategyResult(self.name, Signal.SELL, conf, meta)
 
-        if trend_up_h4 and (not ex_ok) and impulse_up and rsi_ok_for_buy:
+        if trend_up_h4 and (not ex_ok) and impulse_up and rsi_ok_for_trend_buy:
             if self.use_h1_filter:
                 buy_allowed = (h1_trend == "bullish") or (self.allow_neutral_h1 and h1_trend == "neutral")
                 if not buy_allowed:
@@ -259,5 +269,20 @@ class BoomSpikeTrendStrategy(Strategy):
                 conf = min(conf + 0.03, 0.95)
             meta["mode"] = "trend_buy"
             return StrategyResult(self.name, Signal.BUY, conf, meta)
+ 
+        if trend_down_h4 and (not ex_ok) and impulse_down and rsi_ok_for_trend_sell:
+            if self.use_h1_filter:
+                sell_allowed = (h1_trend == "bearish") or (self.allow_neutral_h1 and h1_trend == "neutral")
+                if not sell_allowed:
+                    return StrategyResult(self.name, Signal.HOLD, 0.0, {**meta, "reason": "blocked_by_h1_trend"})
+                if self.use_h1_sr_filter and near_h1_support:
+                    return StrategyResult(self.name, Signal.HOLD, 0.0, {**meta, "reason": "too_close_to_h1_support"})
+
+            conf = 0.55
+            if h1_trend == "bearish":
+                conf = min(conf + 0.03, 0.95)
+
+            meta["mode"] = "trend_sell"
+            return StrategyResult(self.name, Signal.SELL, conf, meta)            
 
         return StrategyResult(self.name, Signal.HOLD, 0.0, {**meta, "reason": "no_setup"})
