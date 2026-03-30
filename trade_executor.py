@@ -589,6 +589,20 @@ class TradeExecutor:
                 count += 1
         return count
 
+    def close_positions_by_tickets(self, tickets: list[int]) -> int:
+        wanted = {int(t) for t in tickets if int(t) > 0}
+        if not wanted:
+            return 0
+
+        count = 0
+        for p in self._positions():
+            ticket = int(getattr(p, "ticket", 0) or 0)
+            if ticket not in wanted:
+                continue
+            if self._close_position_obj(p):
+                count += 1
+        return count
+
     def close_positions_in_profit(self) -> int:
         count = 0
         for p in self._positions():

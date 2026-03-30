@@ -222,7 +222,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_now.setStyleSheet("font-weight:600; color: gray;")
 
         self.cmb_close_mode = QtWidgets.QComboBox()
-        self.cmb_close_mode.addItems(["All", "Profits", "Losses", "Buys", "Sells"])
+        self.cmb_close_mode.addItems(["Selected", "All", "Profits", "Losses", "Buys", "Sells"])
 
         self.btn_close_selected = QtWidgets.QPushButton("Close")
 
@@ -604,9 +604,14 @@ class MainWindow(QtWidgets.QMainWindow):
         pos_tab = QtWidgets.QWidget()
         pos_layout = QtWidgets.QVBoxLayout(pos_tab)
 
-        self.tbl = QtWidgets.QTableWidget(0, 6)
-        self.tbl.setHorizontalHeaderLabels(["Ticket", "Symbol", "Type", "Volume", "Open Price", "Profit"])
+        self.tbl = QtWidgets.QTableWidget(0, 7)
+        self.tbl.setHorizontalHeaderLabels(["Ticket", "Symbol", "Type", "Volume", "Open Price", "Current Price", "Profit"])
         self.tbl.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+        self.tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self.tbl.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+
         pos_layout.addWidget(self.tbl)
 
         self.lbl_totals = QtWidgets.QLabel("Totals: —")
@@ -1076,10 +1081,40 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _selected_position_tickets(self) -> list[int]:
+        tickets: list[int] = []
+        seen: set[int] = set()
+
+        try:
+            for item in self.tbl.selectedItems():
+                row = item.row()
+                ticket_item = self.tbl.item(row, 0)
+                if ticket_item is None:
+                    continue
+                ticket = int((ticket_item.text() or "").strip())
+                if ticket <= 0 or ticket in seen:
+                    continue
+                seen.add(ticket)
+                tickets.append(ticket)
+        except Exception:
+            return []
+
+        return tickets
+
     @QtCore.Slot()
     def close_positions_by_mode(self):
         try:
             mode = self.cmb_close_mode.currentText().strip().lower()
+
+            if mode == "selected":
+                tickets = self._selected_position_tickets()
+                if not tickets:
+                    self.log.write("[CLOSE] No positions selected. Select one or more rows first.")
+                    return
+                closed = self.executor.close_positions_by_tickets(tickets)
+                self.log.write(f"[CLOSE] mode=selected requested={len(tickets)} closed={closed} tickets={tickets}")
+                self.refresh_positions()
+                return
 
             if mode == "all":
                 closed = self.executor.close_all_positions()
@@ -1101,6 +1136,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
 
             self.log.write(f"[CLOSE] mode={mode} closed={closed}")
+            self.refresh_positions()
 
         except Exception as e:
             self.log.write(f"[CLOSE] Failed: {e}")
@@ -2161,6 +2197,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def refresh_positions(self):
         pos = list_positions(self.mt5)
+        selected_tickets = set(self._selected_position_tickets())
 
         self.tbl.setUpdatesEnabled(False)
         self.tbl.setRowCount(0)
@@ -2182,12 +2219,19 @@ class MainWindow(QtWidgets.QMainWindow):
             elif profit < 0:
                 losers += 1
 
+            current_price = float(getattr(p, "price_current", 0.0) or 0.0)
+            if current_price <= 0:
+                tick = self.mt5.symbol_info_tick(getattr(p, "symbol", ""))
+                if tick is not None:
+                    current_price = float(getattr(tick, "bid", 0.0) if typ == "BUY" else getattr(tick, "ask", 0.0) or 0.0)
+
             vals = [
                 str(p.ticket),
                 p.symbol,
                 typ,
                 f"{p.volume:.2f}",
                 f"{p.price_open:.5f}",
+                f"{current_price:.5f}",
                 f"{profit:.2f}",
             ]
 
@@ -2197,12 +2241,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if c == 2:
                     item.setForeground(QtCore.Qt.GlobalColor.darkGreen if typ == "BUY" else QtCore.Qt.GlobalColor.darkRed)
 
-                if c in (3, 4, 5):
+                if c in (3, 4, 5, 6):
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
                 else:
                     item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
 
-                if c == 5:
+                if c == 6:
                     if profit > 0:
                         item.setForeground(QtCore.Qt.GlobalColor.darkGreen)
                     elif profit < 0:
@@ -2211,6 +2255,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         item.setForeground(QtCore.Qt.GlobalColor.darkGray)
 
                 self.tbl.setItem(r, c, item)
+
+
+            if int(getattr(p, "ticket", 0) or 0) in selected_tickets:
+                self.tbl.selectRow(r)
 
         self.tbl.setUpdatesEnabled(True)
 
