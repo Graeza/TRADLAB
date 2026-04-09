@@ -10,6 +10,10 @@ import sys
 import shutil
 from typing import Optional
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from backtest import report
 import joblib
 import pyqtgraph as pg
