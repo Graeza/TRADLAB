@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 import json
 
+import numpy as np
 import pandas as pd
 
 from backtest.broker import SimBroker
@@ -33,10 +34,13 @@ def _precompute_features(bars_by_tf: Dict[int, pd.DataFrame]) -> Dict[int, pd.Da
     return feats_by_tf
 
 
-def _slice_up_to_time(df: pd.DataFrame, time_s: int) -> pd.DataFrame:
+def _slice_up_to_time(df: pd.DataFrame, time_s: int, time_values: Optional[np.ndarray] = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    return df[df["time"] <= int(time_s)].copy()
+    if time_values is None:
+        time_values = df["time"].to_numpy(copy=False)
+    end_idx = int(np.searchsorted(time_values, int(time_s), side="right"))
+    return df.iloc[:end_idx]
 
 
 def run_backtest_next_open(
@@ -60,6 +64,10 @@ def run_backtest_next_open(
         raise ValueError(f"No primary bars for tf={primary_tf}")
 
     feats_by_tf = _precompute_features({tf: bars_by_tf.get(tf, pd.DataFrame()) for tf in timeframes})
+    feat_times_by_tf: Dict[int, np.ndarray] = {
+        tf: feats["time"].to_numpy(copy=False) if feats is not None and not feats.empty and "time" in feats.columns else np.array([], dtype=np.int64)
+        for tf, feats in feats_by_tf.items()
+    }
 
     n = len(primary_bars)
     start_i = max(warmup_bars, 1)
@@ -77,7 +85,7 @@ def run_backtest_next_open(
         data_by_tf: Dict[int, pd.DataFrame] = {}
         for tf in timeframes:
             df = feats_by_tf.get(tf)
-            data_by_tf[tf] = _slice_up_to_time(df, t)
+            data_by_tf[tf] = _slice_up_to_time(df, t, feat_times_by_tf.get(tf))
 
         primary_df = data_by_tf.get(primary_tf, pd.DataFrame())
         regime = detect_regime(primary_df) if primary_df is not None and not primary_df.empty else {"trend": "UNKNOWN", "vol": "UNKNOWN"}
