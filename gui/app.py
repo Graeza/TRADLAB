@@ -530,7 +530,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_positions = QtWidgets.QFormLayout(grp_exec_positions)
 
         self.ex_single_pos_per_symbol = QtWidgets.QCheckBox("Only one open position per symbol")
-        self.ex_single_pos_per_symbol.setChecked(False)
+        self.ex_single_pos_per_symbol.setChecked(True)
         form_exec_positions.addRow(self.ex_single_pos_per_symbol)
 
         self.ex_max_pos_per_symbol = QtWidgets.QSpinBox()
@@ -551,7 +551,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ex_auto_close_boom_buy_profit = QtWidgets.QCheckBox(
             "Auto-close profitable Boom BUY trades"
         )
-        self.ex_auto_close_boom_buy_profit.setChecked(False)
+        self.ex_auto_close_boom_buy_profit.setChecked(True)
         form_exec_positions.addRow(self.ex_auto_close_boom_buy_profit)
 
         self.ex_auto_close_boom_buy_profit_threshold = QtWidgets.QDoubleSpinBox()
@@ -569,13 +569,13 @@ class MainWindow(QtWidgets.QMainWindow):
         form_exec_limits = QtWidgets.QFormLayout(grp_exec_limits)
 
         self.ex_enable_cooldown = QtWidgets.QCheckBox("Enable symbol cooldown")
-        self.ex_enable_cooldown.setChecked(False)
+        self.ex_enable_cooldown.setChecked(True)
         form_exec_limits.addRow(self.ex_enable_cooldown)
 
         self.ex_cooldown_minutes = QtWidgets.QSpinBox()
         self.ex_cooldown_minutes.setRange(0, 10_080)
         self.ex_cooldown_minutes.setSpecialValueText("Disabled")
-        self.ex_cooldown_minutes.setValue(0)
+        self.ex_cooldown_minutes.setValue(10)
         form_exec_limits.addRow("Cooldown (minutes)", self.ex_cooldown_minutes)
 
         self.ex_enable_daily_limits = QtWidgets.QCheckBox("Enable daily trade limits")
