@@ -33,7 +33,7 @@ class TradeExecutor:
         force_symbol_fixed_lot: bool = True,
         boom_crash_fixed_sl_tp: bool = True,
         boom_crash_sl_tp_offset: float = 10.0,
-        enable_trailing_stop: bool = True,
+        enable_trailing_stop: bool = False,
         trailing_trigger_rr: float = 0.5,
         trailing_distance_rr: float = 0.5,
         trailing_step_rr: float = 0.10,
