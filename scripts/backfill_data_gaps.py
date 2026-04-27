@@ -93,6 +93,38 @@ def _iter_target_pairs(symbols: list[str], timeframes: list[int]) -> list[tuple[
     return [(s, int(tf)) for s in symbols for tf in timeframes]
 
 
+def _expected_times(start_s: int, end_s: int, step_s: int) -> list[int]:
+    if step_s <= 0 or end_s < start_s:
+        return []
+    return list(range(int(start_s), int(end_s) + 1, int(step_s)))
+
+
+def _fetch_exact_bar(fetcher: DataFetcher, symbol: str, timeframe: int, bar_time_s: int, tf_s: int) -> pd.DataFrame:
+    """Try to fetch one exact bar by time using small windows around the target."""
+    # first attempt: exact timeframe window
+    windows = [
+        (bar_time_s, bar_time_s + tf_s - 1),
+        (bar_time_s - tf_s, bar_time_s + tf_s),
+    ]
+    for from_s, to_s in windows:
+        df = fetcher.fetch_range(symbol, timeframe, from_s, to_s)
+        if df.empty:
+            continue
+        hit = df[df["time"] == int(bar_time_s)].copy()
+        if not hit.empty:
+            return hit
+    return pd.DataFrame()
+
+
+def _normalize_bar_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["time", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"]
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = None
+    return out[cols].drop_duplicates(subset=["time"]).sort_values("time")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Backfill missing OHLCV bars using gap CSVs from the audit output.")
     ap.add_argument("--db", type=str, default=DB_PATH)
@@ -118,6 +150,8 @@ def main() -> None:
     total_intervals = 0
     total_inserted = 0
     repaired_series = 0
+    total_target_missing = 0
+    total_single_bar_recovered = 0
 
     try:
         for symbol, timeframe in _iter_target_pairs(symbols, timeframes):
@@ -149,6 +183,8 @@ def main() -> None:
                     continue
 
                 total_intervals += 1
+                target_times = _expected_times(start_s, end_s, expected_s)
+                total_target_missing += len(target_times)
                 start_dt = datetime.fromtimestamp(start_s, tz=timezone.utc).isoformat()
                 end_dt = datetime.fromtimestamp(end_s, tz=timezone.utc).isoformat()
 
@@ -160,26 +196,43 @@ def main() -> None:
                 df = fetcher.fetch_range(symbol, timeframe, start_s, end_s)
                 if df.empty:
                     print(f"[BACKFILL]   no bars returned for this interval")
-                    continue
+                    missing_times = target_times
+                else:
+                    df = _normalize_bar_columns(df)
+                    n = db.upsert_bars(df, symbol, timeframe)
+                    total_inserted += int(n)
+                    repaired_this_series += int(n)
+                    print(f"[BACKFILL]   inserted/upserted {n} bar(s) from range fetch")
+                    got_times = set(df["time"].astype(int).tolist())
+                    missing_times = [t for t in target_times if t not in got_times]
 
-                cols = ["time", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"]
-                for c in cols:
-                    if c not in df.columns:
-                        df[c] = None
-                df = df[cols].drop_duplicates(subset=["time"]).sort_values("time")
+                if missing_times:
+                    recovered_rows = []
+                    for ts in missing_times:
+                        one = _fetch_exact_bar(fetcher, symbol, timeframe, ts, expected_s)
+                        if one.empty:
+                            continue
+                        recovered_rows.append(one)
 
-                n = db.upsert_bars(df, symbol, timeframe)
-                total_inserted += int(n)
-                repaired_this_series += int(n)
-                print(f"[BACKFILL]   inserted/upserted {n} bar(s)")
+                    if recovered_rows:
+                        recovered_df = _normalize_bar_columns(pd.concat(recovered_rows, ignore_index=True))
+                        n2 = db.upsert_bars(recovered_df, symbol, timeframe)
+                        total_inserted += int(n2)
+                        repaired_this_series += int(n2)
+                        total_single_bar_recovered += int(len(recovered_df))
+                        print(f"[BACKFILL]   recovered {n2} bar(s) via single-bar fetch")
+                    else:
+                        print(f"[BACKFILL]   could not recover {len(missing_times)} bar(s) via single-bar fetch")
 
             if repaired_this_series > 0:
                 repaired_series += 1
 
         print("\n=== Backfill Complete ===")
         print(f"Gap intervals processed: {total_intervals}")
+        print(f"Target missing bars:     {total_target_missing}")
         print(f"Series repaired:         {repaired_series}")
         print(f"Bars inserted/upserted:  {total_inserted}")
+        print(f"Recovered single bars:   {total_single_bar_recovered}")
 
         if args.rerun_audit:
             print("\nNext step: rerun the DB gap audit to verify the holes were filled.")
