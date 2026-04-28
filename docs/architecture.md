@@ -134,6 +134,144 @@ flowchart LR
     Artifacts --> Runtime[MLModelRegistry + MLStrategy runtime]
 ```
 
+## 5) Database ERD (SQLite `market_data.db`)
+
+```mermaid
+erDiagram
+    BARS {
+        TEXT symbol PK
+        INTEGER timeframe PK
+        INTEGER time PK
+        REAL open
+        REAL high
+        REAL low
+        REAL close
+        REAL tick_volume
+        REAL spread
+        REAL real_volume
+    }
+
+    FEATURES {
+        TEXT symbol PK
+        INTEGER timeframe PK
+        INTEGER time PK
+        INTEGER feature_set_version
+        TEXT feature_set_id
+        REAL open
+        REAL high
+        REAL low
+        REAL close
+        REAL tick_volume
+        REAL spread
+        REAL real_volume
+        REAL ret_1
+        REAL log_ret_1
+        REAL RSI
+        REAL close_EMA10
+        REAL close_EMA21
+        REAL MACD
+        REAL MACD_Signal
+        REAL MACD_Hist
+        REAL positive_candles
+    }
+
+    LABELS {
+        TEXT symbol PK
+        INTEGER timeframe PK
+        INTEGER time PK
+        INTEGER horizon_bars PK
+        REAL future_return
+        INTEGER y_class
+    }
+
+    TRADE_SESSIONS {
+        INTEGER id PK
+        TEXT started_at
+        TEXT stopped_at
+        INTEGER duration_seconds
+        INTEGER trade_count
+        INTEGER win_count
+        INTEGER loss_count
+        REAL total_net
+        REAL buy_net
+        REAL sell_net
+        TEXT notes
+    }
+
+    TRADE_OPEN_EVENTS {
+        INTEGER id PK
+        INTEGER session_id FK
+        TEXT event_time
+        TEXT symbol
+        TEXT side
+        REAL volume
+        REAL entry_price
+        REAL initial_sl
+        REAL initial_tp
+        REAL last_sl
+        REAL last_tp
+        INTEGER position_id
+        INTEGER order_ticket
+        INTEGER deal_ticket
+        TEXT strategy_name
+        TEXT comment
+        TEXT raw_result_json
+    }
+
+    TRADE_STOP_EVENTS {
+        INTEGER id PK
+        INTEGER session_id FK
+        INTEGER position_id
+        TEXT symbol
+        TEXT event_time
+        TEXT event_type
+        REAL sl
+        REAL tp
+        TEXT source
+        TEXT note
+    }
+
+    TRADE_JOURNAL {
+        INTEGER id PK
+        INTEGER session_id FK
+        INTEGER position_id
+        INTEGER deal_ticket
+        TEXT symbol
+        TEXT side
+        REAL volume
+        TEXT entry_time
+        TEXT exit_time
+        REAL entry_price
+        REAL exit_price
+        REAL initial_sl
+        REAL initial_tp
+        REAL last_sl
+        REAL last_tp
+        REAL first_trailing_sl
+        REAL last_trailing_sl
+        REAL gross_profit
+        REAL commission
+        REAL swap
+        REAL fee
+        REAL net_profit
+        TEXT outcome
+        TEXT strategy_name
+        TEXT comment
+    }
+
+    TRADE_SESSIONS ||--o{ TRADE_OPEN_EVENTS : "session_id"
+    TRADE_SESSIONS ||--o{ TRADE_STOP_EVENTS : "session_id"
+    TRADE_SESSIONS ||--o{ TRADE_JOURNAL : "session_id"
+
+    BARS ||--|| FEATURES : "same (symbol,timeframe,time) key (logical)"
+    BARS ||--o{ LABELS : "same (symbol,timeframe,time) key (logical)"
+```
+
+Notes:
+- `trade_open_events`, `trade_stop_events`, and `trade_journal` enforce foreign keys to `trade_sessions(id)`.
+- `bars`, `features`, and `labels` are linked by shared composite keys in application logic (no DB-enforced FK constraints).
+- `features` may include additional dynamically-added feature columns over time.
+
 ## Reading tip
 
 If you are new to the codebase, read in this order:
